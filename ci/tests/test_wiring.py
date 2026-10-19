@@ -22,7 +22,8 @@ This repository runs jobs and stages of its own, written in the templates
 under .azure/project/ that the kit leaves to it: its jobs are included in the
 gates stage and its stages after the publish, each handed the parameters it
 declares, none of them runs a gate, and every stage it declares follows the
-gates.
+gates. Its Rust job takes the repository's own setup steps
+once, before its first check.
 A commit on master, staging or nightly, and a published tag, is pushed to the
 GitHub mirror by the last stage, held to running after the gates and the
 publish and this repository's own stages, on those refs alone, with the mirror's own deploy key.
@@ -103,6 +104,9 @@ PROJECT_PARAMETERS: dict[str, str] = {
     "registryEndpoint": "the-test-cabinet-acr",
     "arm64Pool": "pool-dev-linux-arm64-wus3-4c-eph-01",
 }
+# The steps the Rust job takes from this repository before its first check, or
+# nothing.
+PROJECT_SETUP = ".azure/project/setup-steps.yml"
 # The feed a job authenticates npm to before its first install, or nothing for
 # a kind that builds no workspace.
 FEED_SCRIPT_REGISTRY = "https://pkgs.dev.azure.com/genyume/the-test-cabinet/_packaging/the-test-cabinet/npm/registry/"
@@ -489,6 +493,26 @@ def test_the_pipeline_hands_its_own_templates_what_it_runs_in() -> None:
             f"{template} declares the parameters {sorted(declared)} and is handed {sorted(handed)}; "
             "Azure Pipelines refuses a parameter a template does not declare"
         )
+
+
+def test_the_rust_job_takes_the_repositorys_own_setup_before_its_first_check() -> None:
+    """The setup is included once, in the Rust job, after its fetch and before any gate, and runs no gate."""
+    rust = _gates_jobs()["rust"]
+    include = f"          - template: {PROJECT_SETUP}\n"
+    assert rust.count(include) == 1, f"the Rust job includes {PROJECT_SETUP} {rust.count(include)} times"
+    at = rust.index(include)
+    assert rust.index("scripts/ci/git-sources.sh") < at, "the setup runs before the dependencies are fetched"
+    assert at < rust.index("variable=checksReady]true"), "the setup runs after the checks began"
+    assert at < min(match.start() for match in GATE_RUN.finditer(rust)), "a gate runs before the setup"
+    for job, steps in _gates_jobs().items():
+        if job != "rust":
+            assert PROJECT_SETUP not in steps, f"the {job} job includes {PROJECT_SETUP}"
+    path = ROOT / PROJECT_SETUP
+    assert path.is_file(), f"the pipeline includes {PROJECT_SETUP}, which the repository does not hold"
+    text = path.read_text(encoding="utf-8")
+    assert re.search(r"^steps:", text, re.MULTILINE), f"{PROJECT_SETUP} is not a steps template"
+    assert _declared_parameters(path) == [], f"{PROJECT_SETUP} declares parameters the pipeline does not hand it"
+    assert _named(text) == set(), f"{PROJECT_SETUP} runs a gate, which the kit gives a step of its own"
 
 
 def test_the_repositorys_own_jobs_are_in_the_gates_stage() -> None:
