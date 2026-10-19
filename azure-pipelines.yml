@@ -45,6 +45,9 @@
 # agent pool, since a template cannot read this file's resources. The mirror
 # waits on the gates stage, those jobs included, and on each of the
 # repository's own stages, which the kit's PROJECT_PIPELINE table names.
+# The Rust job takes the steps of setup-steps.yml, beside them, after it
+# fetched its dependencies and before its first check: what compiling the
+# workspace needs beyond the track's image.
 #
 # The repository kit writes this file, so a change arrives with
 # `scripts/repos/render.py --update` run from the superrepo rather than by
@@ -97,7 +100,7 @@ stages:
     jobs:
       - job: rust
         displayName: Rust
-        timeoutInMinutes: 60
+        timeoutInMinutes: 120
         container: rust
         uses:
           repositories:
@@ -132,6 +135,8 @@ stages:
             displayName: Fetch the project's dependencies from Azure
             env:
               SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          # This repository's own setup, before the first check.
+          - template: .azure/project/setup-steps.yml
           - script: echo "##vso[task.setvariable variable=checksReady]true"
             displayName: Ready to run the checks
           - script: uv run --quiet --project ci gate run dependency-edges

@@ -8,7 +8,7 @@ edition.workspace = true
 # and the whole recorded corpus claims to come from one indistinguishable build.
 # It is the version a `v*` tag releases; the release a deployment runs is pinned in
 # the driver, independently of it.
-version = "0.7.0"
+version = "0.7.1"
 license.workspace = true
 publish.workspace = true
 # Named explicitly rather than left to cargo's auto-detection of a `build.rs`, because building this

@@ -45,7 +45,8 @@ that spawns Node reads that one variable.
 
 The rest need a toolchain in the image, so a gg run resolves the `-gg` variant
 of the image it would otherwise get: that image plus the toolchain tree
-assembled by `containers/gg-toolchains/`. Three properties hold of it.
+assembled by `containers/gg-toolchains/` and published with each release as
+`test-cabinet-gg-toolchains:<version>`. Three properties hold of it.
 
 - Every toolchain is present together. Language is resolved per agent, so one
   run may drive a C# agent and a Python agent at once and there is no such thing

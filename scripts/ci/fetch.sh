@@ -53,8 +53,7 @@ GG_FETCH_DELAY="${GG_FETCH_DELAY:-5}"
 
 # The directory large downloads are staged in, which is NOT `mktemp -d`.
 #
-# `$HOME/.cache` is where the image builds already mount a BuildKit cache over (see the
-# `gg-toolchain-downloads` mount in deployments/images/services.Dockerfile), so a partial file
+# `$HOME/.cache` is where an image build can mount a BuildKit cache over, so a partial file
 # left here by a failed build is still here for the next one, and a developer's machine gets
 # the same behaviour for free out of the same path. Every installer deletes its own staged
 # archives once the install they feed has verified itself, so a build that succeeds leaves

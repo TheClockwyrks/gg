@@ -10,17 +10,15 @@
 # the two archives are byte-comparable; scripts/ci/publish-gg.sh uploads the x86_64 one
 # under `v<version>/` by name.
 #
-# BOTH ARCHITECTURES PACK THEM, and the reason is that the documents are consumed
-# per-architecture rather than once. The backend image bakes them at /opt/gg-reference and
-# is built natively per architecture, so each architecture's service-image job needs a copy
-# — scripts/ci/gg-prebuilt.sh stages this one. Packing on one architecture and projecting
-# on the other is the arrangement that let `gg reference --out` fail on x86_64 alone and be
-# found in an image build rather than in a gate. Projecting here makes the command a gate on
-# every architecture that publishes a binary, for about four seconds and 220 KB.
+# BOTH ARCHITECTURES PACK THEM, though one is uploaded, because projecting is what runs
+# `gg reference --out` with the binary just built. Packing on one architecture alone is the
+# arrangement that once let the command fail on x86_64 alone and be found in an image build
+# rather than in a gate. Projecting here makes the command a gate on every architecture that
+# publishes a binary, for about four seconds and 220 KB.
 #
-# These are the objects scripts/ci/publish-gg.sh uploads under `v<version>/`, and the ones
-# the backend and driver images consume through scripts/ci/gg-prebuilt.sh. gg's
-# program-language toolchains (scripts/ci/install-gg-toolchains.sh and
+# These are the objects scripts/ci/publish-gg.sh uploads under `v<version>/` on a `v*` tag,
+# which the backend and driver images of The Test Cabinet fetch for the version the driver
+# pins. gg's program-language toolchains (scripts/ci/install-gg-toolchains.sh and
 # install-gg-build-toolchains.sh), `npm ci` and a musl C toolchain are prerequisites.
 set -euo pipefail
 # shellcheck source=/dev/null
@@ -47,8 +45,8 @@ trap 'rm -rf "$staging"' EXIT
 tar -czf "${out}/gg-reference.tar.gz" -C "$staging" gg-reference
 
 # The identity of what this published, recorded at the source. The binary's digest is what
-# ties a service image's baked gg back to this build (gg-prebuilt.sh prints the same digest
-# on the consuming side), and the document listing is what says the projection produced
+# ties a release object, and the gg an image fetched, back to this build, and the document
+# listing is what says the projection produced
 # twelve non-empty documents rather than an empty directory.
 log "what this architecture published"
 ls -l "$out"
