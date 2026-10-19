@@ -98,7 +98,7 @@
 //! the one place a `dotnet` command is built. It is the [Swift arm](super::super::swift)'s
 //! arrangement, arrived at from the same failure: a toolchain published against one distribution,
 //! copied into an image built from another, carrying the closure it needs and naming it on the
-//! loader path rather than hoping. `apps/docs/src/content/docs/gg/languages/compilation.md` states
+//! loader path rather than hoping. `docs/languages/compilation.md` states
 //! the rule for every arm.
 //!
 //! `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` also makes `csc` run, and was **rejected**. It does not
@@ -981,7 +981,7 @@ fn missing_toolchain() -> String {
 /// in a model's context window: someone is reading a defect in gg's own arrangement and wants all of
 /// it. What it carries is what the seam's own contract says a toolchain failure carries — "the exit
 /// status, the signal and the tail of the compiler's stderr"
-/// (`apps/docs/src/content/docs/gg/languages/compilation.md`) — and
+/// (`docs/languages/compilation.md`) — and
 /// [`CompilerReport::stderr_tail`] has already trimmed that tail to the size a crash report needs.
 ///
 /// The status and the stderr are here because of what they cost when they were not. Both of these

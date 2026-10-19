@@ -178,7 +178,7 @@ enum Command {
     ///
     /// It is a subcommand rather than a test for the same reason: `cargo` never enters the image a
     /// run executes in. `crates/gg/src/selfcheck.rs` carries the failure the design comes from, and
-    /// `apps/docs/src/content/docs/gg/languages/selfcheck.md` says where it is run.
+    /// `docs/languages/selfcheck.md` says where it is run.
     Selfcheck(SelfcheckArgs),
 }
 

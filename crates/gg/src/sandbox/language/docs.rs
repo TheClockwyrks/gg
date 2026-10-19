@@ -3,7 +3,7 @@
 //!
 //! # What it is for
 //!
-//! The pages under `apps/docs/src/content/docs/gg/` are authoritative over this crate, and several
+//! The pages under `docs/` are authoritative over this crate, and several
 //! of them teach by showing a program. Nothing read those programs. A page could name a call the
 //! SDK does not declare, spell an argument the signature does not take, or omit the `import` the
 //! [invariants](https://docs.testcabinet.ai/gg/responses-as-code/invariants/) require of every
@@ -28,12 +28,12 @@
 //!
 //! # What is gathered
 //!
-//! Fenced blocks in `apps/docs/src/content/docs/gg/`, recursively, whose info string opens with a
+//! Fenced blocks in `docs/`, recursively, whose info string opens with a
 //! tag in [`ARMS`]. That table is the one place a spelling is written down.
 //!
-//! The tree is `gg/` alone rather than all of `apps/docs`. A TypeScript block on the web console's
-//! page is TypeScript about a React app, and compiling it against gg's SDK would report a defect
-//! that is not one.
+//! The tree is gg's own pages alone rather than the whole documentation site, which the superrepo
+//! holds. A TypeScript block on the web console's page is TypeScript about a React app, and
+//! compiling it against gg's SDK would report a defect that is not one.
 //!
 //! A fence is read at the start of a line, which is where every fence in these pages sits. One
 //! indented into a list item is not gathered, and `the_documentation_is_where_the_gate_looks_for_it`
@@ -56,7 +56,7 @@ use super::compile::PrepareContext;
 use super::{ProgramLanguage, language};
 
 /// The documentation tree whose fenced programs this gate compiles, relative to this crate.
-const DOCS: &str = "../../apps/docs/src/content/docs/gg";
+const DOCS: &str = "../../docs";
 
 /// The Markdown info-string tags a page writes a program under, and the arm each is compiled by.
 ///

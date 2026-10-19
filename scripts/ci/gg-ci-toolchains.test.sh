@@ -6,7 +6,9 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly NODE="24.16.0"
+# The pin the script carries, so the case below runs at whatever it names.
+NODE="$(sed -n 's/^readonly NODE_VERSION="\(.*\)"$/\1/p' "$here/gg-ci-toolchains.sh")"
+readonly NODE
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -48,18 +50,12 @@ printf '%s' "$HOME/.gem/ruby/3.3.0"
 EOF
 chmod +x "$work/bin/curl" "$work/bin/ruby"
 
-# A fixture checkout: the script and its two libraries, the compose file the Node pin is read
-# from, and installers that record the HOME and PATH they ran with.
-fixture() { # name [NODE_VERSION line]
+# A fixture checkout: the script and its library, and installers that record the HOME and PATH
+# they ran with.
+fixture() { # name
 	local dir="$work/$1"
-	mkdir -p "$dir/scripts/ci" "$dir/.devcontainer"
-	cp "$here/gg-ci-toolchains.sh" "$here/lib.sh" "$here/tcab-lib.sh" "$dir/scripts/ci/"
-	{
-		echo "x-devcontainer-build-args: &devcontainer-build-args"
-		[[ $# -lt 2 ]] || echo "  $2"
-		echo "  RUST_VERSION: 1.97.1"
-		echo "services: {}"
-	} >"$dir/.devcontainer/docker-compose.yml"
+	mkdir -p "$dir/scripts/ci"
+	cp "$here/gg-ci-toolchains.sh" "$here/tcab-lib.sh" "$dir/scripts/ci/"
 	for installer in install-gg-toolchains install-gg-build-toolchains; do
 		cat >"$dir/scripts/ci/$installer.sh" <<-EOF
 			#!/usr/bin/env bash
@@ -82,7 +78,8 @@ run() { # dir home args... ; sets out and status
 }
 
 # 1. A full run on an empty cache: Node, the links, both installers, the PATH lines.
-dir="$(fixture full "NODE_VERSION: $NODE")"
+[[ "$NODE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "the script pins no Node version: '$NODE'"
+dir="$(fixture full)"
 home="$work/full-home"
 mkdir -p "$home/.cache/uv"
 echo kept >"$home/.cache/uv/from-the-image"
@@ -117,7 +114,7 @@ run "$dir" "$home" "$work/cache"
 [[ -e "$home/.local/bin/install-gg-toolchains" ]] || fail "warm: the cached .local is not visible through the link"
 
 # 3. --node-only: Node and its PATH line, and no installer and no link.
-dir="$(fixture nodeonly "NODE_VERSION: $NODE")"
+dir="$(fixture nodeonly)"
 home="$work/nodeonly-home"
 run "$dir" "$home" "$work/nodeonly-cache" --node-only
 [[ "$status" -eq 0 ]] || fail "node-only: exited $status: $out"
@@ -127,16 +124,7 @@ run "$dir" "$home" "$work/nodeonly-cache" --node-only
 [[ "$out" == *"##vso[task.prependpath]$work/nodeonly-cache/node/bin"* ]] || fail "node-only: no prependpath for Node"
 [[ "$out" != *".local/bin"* ]] || fail "node-only: prepended .local/bin"
 
-# 4. A compose file that pins no Node is refused before anything is fetched.
-: >"$work/curl.log"
-dir="$(fixture nopin)"
-run "$dir" "$work/nopin-home" "$work/nopin-cache"
-[[ "$status" -ne 0 ]] || fail "no pin: exited 0"
-[[ "$out" == *"NODE_VERSION"* ]] || fail "no pin: does not name NODE_VERSION: $out"
-[[ ! -s "$work/curl.log" ]] || fail "no pin: downloaded something"
-[[ ! -e "$dir/installers.log" ]] || fail "no pin: an installer ran"
-
-# 5. Usage errors.
+# 4. Usage errors.
 run "$dir" "$work/usage-home"
 [[ "$status" -eq 2 ]] || fail "usage: no cache dir exited $status, wanted 2"
 run "$dir" "$work/usage-home" "$work/x" --everything

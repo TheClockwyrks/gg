@@ -1,0 +1,10 @@
+# The answers this repository was rendered with and the superrepo commit its
+# kit was last rendered or updated from. Copier maintains it through the
+# superrepo's scripts/repos/render.py; a change made here is overwritten by
+# the next update.
+_commit: v0.6.3-5093-gf961bffbb
+_src_path: ..
+description: 'gg, the agent harness: its crates, the sandbox packages and SDKs of
+    its program languages, their toolchain installers, and its documentation.'
+kind: application
+name: gg

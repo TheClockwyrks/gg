@@ -1,0 +1,204 @@
+# The workspace of the gg repository: gg itself, and under
+# crates/gg-sandbox-artifacts/ the shared build-script body and the ten
+# program-language ARTIFACT crates, each of which builds one arm's compile inputs
+# (a guest component, an SDK jar, a compiler) into its own `OUT_DIR` and
+# publishes the directory to `crates/gg`, which `include_bytes!`s them from
+# there. They are ten crates rather than ten steps of `crates/gg/build.rs` so
+# that each arm has its own rerun set; the argument is in `gg-artifact-build`'s
+# header, along with the recipe for adding one. Ten crates serve eleven arms,
+# because `packages/gg-sandbox` builds TypeScript and JavaScript from one build,
+# as `scripts/gg-arms.sh` does. The two Cargo workspaces under packages/ (the
+# Rust arm's library set and the ECMAScript guest) are their own workspaces,
+# compiled for wasm by their arms' build scripts, and no member.
+[workspace]
+# The resolver of edition 2024, the monorepo's, so a crate resolves the same
+# features and the same MSRV-aware versions on both sides of an extraction.
+resolver = "3"
+members = ["crates/gg", "crates/gg-sandbox-artifacts/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+license = "MIT"
+repository = "https://github.com/TheClockwyrks/gg"
+# A crate of The Test Cabinet is consumed by its git source, never from
+# crates.io, so none is published; a member says `publish.workspace = true`, and
+# Cargo refuses that key when the root holds none to inherit.
+publish = false
+
+# Warnings-as-errors, baked into the manifests for every member crate that
+# opts in with `[lints] workspace = true`, so a plain `cargo build` enforces
+# the policy the clippy gate enforces on the command line.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+
+# The crates of the other repositories this one may depend on, each at its
+# public source, the GitHub mirror, and the tag its dependents pin. The
+# superrepo's .cargo/config.toml redirects every one of these to the sibling
+# checkout, so a build inside the superrepo never fetches them. A manifest
+# never names an Azure URL or a path outside the repository: the
+# dependency-edges gate refuses both.
+[workspace.dependencies]
+test-cabinet-contracts = { git = "https://github.com/TheClockwyrks/contracts", tag = "v0.2.1" }
+# The crates.io dependencies gg's crates inherit with `{ workspace = true }`, at
+# the requirements the monorepo's workspace held them at when gg was extracted.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+# Collision-resistant unique identifiers for gg's session, turn and memory ids.
+cuid2 = "0.1"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+# gg's model-facing prose is authored as Handlebars templates and embedded at
+# compile time (`crates/gg/src/prompts.rs`), in the strict-mode, no-escape
+# configuration the suites crate renders a test case's `prompt.hbs` with.
+handlebars = "6"
+tempfile = "3"
+# Gzip, the pure-Rust `miniz_oxide` backend (no system zlib), for the PureScript
+# arm's compiled library set gg unpacks once per machine.
+flate2 = "1"
+# Base64 for a workspace image a `read_file` attaches to its tool result as a
+# `data:` URL.
+base64 = "0.22"
+# The HTTP client the model client reaches OpenRouter with. rustls, so the build
+# needs no system OpenSSL and links statically under musl; `stream` for
+# `Response::bytes_stream`, which gg's streaming model transport reads
+# server-sent events off, so its loop detector can abandon a reply while the
+# model is still writing it (`crates/gg/src/client.rs`).
+reqwest = { version = "0.12", default-features = false, features = [
+	"json",
+	"rustls-tls",
+	"stream",
+] }
+# The wasm runtime of gg's responses-as-code sandbox. `cranelift` is the JIT;
+# `cache` is left out because gg runs one process per run in an ephemeral
+# container, where a compile cache buys nothing.
+#
+# `gc` and `gc-null` are here for gg's C++ program language. C++ exceptions
+# compile to the wasm exception-handling proposal, and wasmtime gates that
+# proposal behind `Config::wasm_exceptions`, which is `#[cfg(feature = "gc")]`:
+# an exception reference is a GC-managed value, so the runtime will not build the
+# setter without GC support, and it refuses to build an `Engine` at all when `gc`
+# is on and no collector is. `gc-null` is the cheapest collector there is: it
+# allocates nothing and collects nothing, which is right for a feature whose
+# only user here allocates no GC objects. Without both, a C++ program that links
+# libc++'s `eh` build is refused with *exceptions proposal not enabled*. gg adds
+# the features of its own engine in `crates/gg/Cargo.toml`.
+wasmtime = { version = "45", default-features = false, features = [
+	"cranelift",
+	"gc",
+	"gc-null",
+	"runtime",
+] }
+# The WASI preview-2 host gg links into every guest (`crates/gg/src/sandbox.rs`).
+# Only `p2`: the default set also pulls the preview-1 adapter and `wiggle`, which
+# no guest imports. Same major version as `wasmtime`.
+wasmtime-wasi = { version = "45", default-features = false, features = ["p2"] }
+# Turning a core wasm module into a component, in process, on the turn path
+# (`crates/gg/src/sandbox/language/rust.compile.rs`, `swift.compile.rs`): the
+# step `wasm-tools component new` performs, as a library, so no second binary is
+# installed in a run container. Pinned to the wasmparser line `wasmtime` 45 is
+# built on (0.248), so the workspace resolves ONE `wasmparser`/`wasm-encoder`
+# pair: an encoder from a newer line may emit a component feature the runtime's
+# validator does not know.
+wit-component = "0.248"
+# The WIT parser `wit-component` is built on, at the same pin for the same
+# reason: gg stamps the `component-type` section of the JVM arms' modules
+# (`sandbox/language/jvm.rs`), which needs a `Resolve` and a `WorldId` from the
+# very crate the encoder reads them with.
+wit-parser = "0.248"
+# The source-map reader gg resolves a guest frame through
+# (`crates/gg/src/sandbox/locate.rs`).
+sourcemap = "9"
+# The operating system's entropy, at the version `wasmtime-wasi` already pulls
+# in, so gg's own reads and WASI's `random_get` come from one generator.
+getrandom = "0.3"
+# Draining `reqwest`'s `bytes_stream()`; `bytes` is the buffer WASI's
+# `output-stream` speaks in. Both already in the graph through reqwest and tokio.
+futures-util = "0.3"
+bytes = "1"
+# `http::Response`, which a timeout test builds its stand-in gateway's reply
+# from (`crates/gg/src/client.timeout.test.rs`).
+http = "1"
+# The content key of the test suite's on-disk cache of compiled components
+# (`crates/gg/src/sandbox/engine.cache.rs`).
+sha2 = "0.10"
+# The BPE tokenizer behind gg's context-window token estimate
+# (`crates/gg/src/context.rs`): a fixed base (o200k) as a documented cross-model
+# approximation, with the vocabulary embedded, so no network and no system
+# dependency.
+tiktoken-rs = "0.7"
+
+# Cranelift compiles gg's sandbox components (`crates/gg/src/sandbox`) in test
+# processes, and `cargo nextest` runs ONE PROCESS PER TEST. The test suite's
+# on-disk cache (`crates/gg/src/sandbox/engine.cache.rs`) spares most processes
+# the embedded guests' compile, but the first processes of a build still pay it
+# and every compiled arm (Swift above all) compiles a new artifact per program.
+# These are the crates that compile a component and read its debug information
+# (Cranelift, wasmtime's compile path, and the DWARF readers a Swift artifact's
+# `.debug_*` sections go through), none of them members, so optimising them
+# changes no behaviour under test and roughly halves the CPU a component compile
+# costs; the cost is one slower first build.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen-shared]
+opt-level = 3
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+
+[profile.dev.package.cranelift-bitset]
+opt-level = 3
+
+[profile.dev.package.cranelift-control]
+opt-level = 3
+
+[profile.dev.package.cranelift-native]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.wasmtime]
+opt-level = 3
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-core]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
+[profile.dev.package.gimli]
+opt-level = 3
+
+[profile.dev.package.addr2line]
+opt-level = 3
+
+[profile.dev.package.object]
+opt-level = 3
+
+# The test suite keys its cache of compiled components on a SHA-256 of each
+# component, and the embedded guests are tens of megabytes: unoptimised, hashing
+# the 25 MB Python guest takes ~1.3s, against ~75ms optimised. Optimising the
+# hash changes no output, only how long the digest takes.
+[profile.dev.package.sha2]
+opt-level = 3

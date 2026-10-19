@@ -1,7 +1,7 @@
 # `gg-sandbox-csharp`
 
 The **C#** arm of gg's
-[responses-as-code](../../apps/docs/src/content/docs/gg/responses-as-code/overview.md)
+[responses-as-code](../../docs/responses-as-code/overview.md)
 capability: the guest that evaluates a model's C# program, the hand-written SDK that
 program calls, and the builds that produce both.
 

@@ -54,7 +54,7 @@
 //! `gg::files::FileRead` is both the key a documentation view is opened by and a path a program can
 //! write. Every call hands back `Result<_, core::ApiError>`, and optional arguments are a struct
 //! with a `Default`. What that looks like in full is in
-//! `apps/docs/src/content/docs/gg/languages/rust.md`.
+//! `docs/languages/rust.md`.
 //!
 //! The library set is `std` plus the five crates `packages/gg-sandbox-rust/Cargo.toml` declares
 //! under a `# --- heading ---`: `regex`, `serde_json`, `base64`, `itertools` and `indexmap`. Only

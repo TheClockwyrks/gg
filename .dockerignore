@@ -1,0 +1,26 @@
+# The build context of every image built from this repository's root, which
+# today is containers/gg-toolchains/Dockerfile, the toolchains image a release
+# publishes. An allowlist: everything is left out, and each path an image reads
+# is re-included by name, never by a wildcard (scripts/ci/build-context.sh says
+# why), with the image that reads it named beside it. The `build-context` gate
+# holds every COPY source to this file.
+*
+
+# containers/gg-toolchains/Dockerfile: each arm's block copies that arm's
+# version file and the installer a developer's or CI machine runs, with the
+# fetch helper every installer sources, and runs the installer against that
+# slice, so the versions the image installs are read from the same pins.
+!/packages/gg-sandbox-cpp/cpp-version.sh
+!/packages/gg-sandbox-csharp/csharp-version.sh
+!/packages/gg-sandbox-java/java-version.sh
+!/packages/gg-sandbox-kotlin/kotlin-version.sh
+!/packages/gg-sandbox-purescript/purescript-version.sh
+!/packages/gg-sandbox-purescript/spago.yaml
+!/packages/gg-sandbox-swift/swift-version.sh
+!/scripts/ci/fetch.sh
+!/scripts/ci/install-dotnet.sh
+!/scripts/ci/install-java.sh
+!/scripts/ci/install-kotlin.sh
+!/scripts/ci/install-purescript.sh
+!/scripts/ci/install-swift.sh
+!/scripts/ci/install-wasi-sdk.sh

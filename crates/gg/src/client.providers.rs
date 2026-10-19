@@ -1,7 +1,7 @@
 //! The run's provider candidates: which one each model's requests name, when the run moves to
 //! the next, and what counts as an unexpected cache miss.
 //!
-//! See "Moving to the next candidate" in `apps/docs/src/content/docs/gg/overview.md`. The
+//! See "Moving to the next candidate" in `docs/overview.md`. The
 //! [roster](ProviderRoster) is run-wide, shared by every client the run's
 //! [factory](super::DefaultClientFactory) builds, because a move is the whole run's: every later
 //! request of every agent of that model names the candidate now in force. The

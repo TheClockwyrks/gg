@@ -6,11 +6,10 @@
 #   scripts/ci/gg-ci-toolchains.sh <cache-dir>              # Node, then gg's toolchains
 #   scripts/ci/gg-ci-toolchains.sh <cache-dir> --node-only  # Node alone
 #
-# It is the one provisioner for every job that compiles the workspace: the
-# template's `rust` job (through .azure/project/setup-steps.yml), the project's
-# Rust container jobs, and the arm64 gg build on the organisation's pool, all
-# through .azure/tcab/gg-toolchains-steps.yml, which restores <cache-dir> with a
-# Cache@2 task first and saves it after a job that succeeded.
+# It is the one provisioner for every job of gg's pipeline that compiles the
+# workspace: the Rust gates, the test partitions and the release builds, each
+# restoring <cache-dir> with a Cache@2 task first and saving it after a job that
+# succeeded.
 #
 # WHY IT EXISTS. The Rust CI image carries the compiler, nextest and the apt
 # packages ci/images/rust.Dockerfile names, and deliberately no Node
@@ -18,15 +17,15 @@
 # reflects gg's signature catalogues with the npm workspace's pinned
 # `typescript`, and every arm's SDK and documentation tool (about 3.4 GB, see
 # scripts/ci/install-gg-toolchains.sh). The developer's devcontainer image
-# bakes the same set through .devcontainer/languages/gg/install.sh, from the
-# same installers.
+# (the superrepo's) bakes the same set through its
+# .devcontainer/languages/gg/install.sh, from the same installers in the gg
+# checkout.
 #
 # WHAT IT DOES, in order:
 #
-#   1. Node, at the NODE_VERSION .devcontainer/docker-compose.yml pins (read with
-#      the template's `build_arg`), from the official tarball into
+#   1. Node, at NODE_VERSION below, from the official tarball into
 #      <cache-dir>/node, then `##vso[task.prependpath]` so every later step of the
-#      job finds it. scripts/ci/npm-install.sh refuses any other Node.
+#      job finds it.
 #   2. The default install locations under $HOME that the gg installers and
 #      crates/gg/build.rs use become symlinks into <cache-dir>/home: $HOME/.local
 #      (every pinned toolchain prefix, `purs`, `esbuild`, uv's own dirs), uv's
@@ -56,10 +55,15 @@
 # this against a scratch directory to reproduce a job's provisioning.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci/lib.sh
-source "$here/lib.sh"
 # shellcheck source=scripts/ci/tcab-lib.sh
 source "$here/tcab-lib.sh"
+
+# The Node the jobs build with: the one the superrepo's devcontainer pins as its
+# NODE_VERSION build argument, which is the Node of the toolchain image every CI
+# image is built on, so a job here and a developer's container run the
+# workspace's `tsc` on one Node. scripts/ci/gg-image-toolchains.test.sh holds the
+# two to each other wherever the superrepo's compose file is beside the checkout.
+readonly NODE_VERSION="24.16.0"
 
 usage() {
 	echo "usage: scripts/ci/gg-ci-toolchains.sh <cache-dir> [--node-only]" >&2
@@ -77,8 +81,7 @@ cache="$(cd "$1" && pwd)"
 readonly cache node_only
 
 # --- 1. Node -------------------------------------------------------------------------------------
-node_version="$(build_arg NODE_VERSION)"
-readonly node_version
+readonly node_version="$NODE_VERSION"
 case "$(uname -m)" in
 	x86_64 | amd64) node_arch=x64 ;;
 	aarch64 | arm64) node_arch=arm64 ;;

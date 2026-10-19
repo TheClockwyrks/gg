@@ -15,7 +15,7 @@
 //! # Why a second guest exists at all
 //!
 //! Because the incumbent one cannot keep the contract, and not for want of configuration.
-//! `apps/docs/src/content/docs/gg/responses-as-code/invariants.md` requires that the bytes gg
+//! `docs/responses-as-code/invariants.md` requires that the bytes gg
 //! evaluates are the bytes the model sent and that every SDK name a program uses comes from an
 //! `import` the program wrote. StarlingMonkey — the engine `componentize-js` bakes — has no way to
 //! evaluate module source at run time by ANY route: `import()` of a `data:` URL, of a `blob:`, of a

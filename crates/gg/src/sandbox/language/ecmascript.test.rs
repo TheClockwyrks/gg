@@ -570,7 +570,7 @@ try { await caught; } catch (e) { console.log("caught " + e.message); }
 /// before it. A call inside a declarator is a call, and does carry its own.
 ///
 /// It is the engine's own number in every case, so nothing here corrects one. What this test is for
-/// is that the boundary cannot move without somebody deciding it: `apps/docs/src/content/docs/gg/languages/javascript.md`
+/// is that the boundary cannot move without somebody deciding it: `docs/languages/javascript.md`
 /// states it to a reader, and this states it to CI.
 #[test]
 fn a_frame_carries_the_position_of_the_construct_that_emitted_one() {

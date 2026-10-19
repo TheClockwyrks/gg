@@ -3,7 +3,7 @@
 //! This is the whole reason the ECMAScript arms left their previous engine. A program is a **module**
 //! here — `Module::declare(ctx, "program.js", program)` over the model's own bytes — so every name it
 //! uses is reached through an `import` line it wrote, which is what
-//! `apps/docs/src/content/docs/gg/responses-as-code/invariants.md` requires and what the incumbent
+//! `docs/responses-as-code/invariants.md` requires and what the incumbent
 //! could not do at any setting.
 //!
 //! # The four namespaces

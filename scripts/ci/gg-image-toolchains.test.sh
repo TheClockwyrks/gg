@@ -9,8 +9,9 @@
 # `java` and `wit-bindgen`. The subject is the tree of links and stamps it builds at each default
 # home, that the installers and resolvers run after it against that tree say each arm is already
 # installed and fetch nothing beyond the TeaVM jars the jvm image's cache lacks, that an image
-# holding another version than the pin stops it with the pin file named, and that the image tags
-# the devcontainer's compose file names are the versions this repository's pins hold.
+# holding another version than the pin stops it with the pin file named, and, where the
+# superrepo's devcontainer compose file is beside this checkout, that the image tags it names are
+# the versions this repository's pins hold.
 #
 # The pins are read in a subshell, so that sourcing the version files leaves this shell's own
 # variables alone, and arrive through `eval`, which shellcheck cannot follow.
@@ -503,35 +504,46 @@ expect_mismatch "a wasm-components image of another wit-bindgen" "$tmp/wit-home"
 
 # The anchor's image tags name the versions this repository pins, ignoring the content digest every
 # language image tag ends in, so a template update that moves an image without the pin fails here
-# rather than in the image build. The tags are read from this checkout's compose file.
-compose="$REPO_DIR/.devcontainer/docker-compose.yml"
-tag() { # NAME_IMAGE
-	sed -n "s|^  $1: [^:]*:\\(.*\\)\$|\\1|p" "$compose"
-}
-check_tag() { # label NAME_IMAGE prefix-or-fragment
-	local tag
-	tag="$(tag "$2")"
-	if [[ "$tag" =~ _[0-9a-f]{8}$ ]] && [[ "_${tag%_*}_" == *"_$3_"* ]]; then
-		ok "$1"
-	else
-		bad "$1" "expected $2's tag to name $3" "got: ${tag:-<no $2>}"
-	fi
-}
-check_tag "the swift image is Swift $SWIFT" SWIFT_IMAGE "${SWIFT}_wasm-sdk-${SWIFT_SDK}"
-check_tag "the wasi-sdk image is wasi-sdk $WASI_SDK" WASI_SDK_IMAGE "$WASI_SDK"
-check_tag "the dotnet image is the SDK $DOTNET" DOTNET_IMAGE "$DOTNET"
-check_tag "the jvm image is the JDK $JDK" JVM_IMAGE "jdk-${JDK//+/-}"
-check_tag "and Kotlin $KOTLIN" JVM_IMAGE "kotlin-$KOTLIN"
-# TeaVM's own jars are taken from the jvm image's Gradle cache, so its pin is held to the tag too.
-check_tag "and TeaVM $TEAVM" JVM_IMAGE "teavm-$TEAVM"
-check_tag "the ruby image is YARD $YARD" RUBY_IMAGE "yard-$YARD"
-check_tag "the python image is componentize-py $COMPONENTIZE" PYTHON_IMAGE "componentize-py-$COMPONENTIZE"
-check_tag "the purescript image is purs $PURS" PURESCRIPT_IMAGE "$PURS"
-check_tag "and spago $SPAGO" PURESCRIPT_IMAGE "spago-$SPAGO"
-check_tag "the wasm-components image is the C++ arm's wit-bindgen $WIT_BINDGEN" WASM_COMPONENTS_IMAGE \
-	"wit-bindgen-$WIT_BINDGEN"
-check_tag "and the Swift arm's $SWIFT_WIT_BINDGEN" WASM_COMPONENTS_IMAGE "wit-bindgen-$SWIFT_WIT_BINDGEN"
-check_tag "and the Rust arm's lock's $RUST_WIT_BINDGEN" WASM_COMPONENTS_IMAGE "wit-bindgen-$RUST_WIT_BINDGEN"
+# rather than in the image build. The anchor is the superrepo's: its devcontainer builds the image
+# this script links, from the superrepo's checkout of gg, so the compose file is read beside this
+# checkout (GG_DEVCONTAINER_COMPOSE names another). gg on its own, as its pipeline checks it out,
+# has no devcontainer and so nothing to hold the pins to, and these cases are skipped, saying so.
+compose="${GG_DEVCONTAINER_COMPOSE:-$REPO_DIR/../.devcontainer/docker-compose.yml}"
+if [ -f "$compose" ]; then
+	tag() { # NAME_IMAGE
+		sed -n "s|^  $1: [^:]*:\\(.*\\)\$|\\1|p" "$compose"
+	}
+	check_tag() { # label NAME_IMAGE prefix-or-fragment
+		local tag
+		tag="$(tag "$2")"
+		if [[ "$tag" =~ _[0-9a-f]{8}$ ]] && [[ "_${tag%_*}_" == *"_$3_"* ]]; then
+			ok "$1"
+		else
+			bad "$1" "expected $2's tag to name $3" "got: ${tag:-<no $2>}"
+		fi
+	}
+	check_tag "the swift image is Swift $SWIFT" SWIFT_IMAGE "${SWIFT}_wasm-sdk-${SWIFT_SDK}"
+	check_tag "the wasi-sdk image is wasi-sdk $WASI_SDK" WASI_SDK_IMAGE "$WASI_SDK"
+	check_tag "the dotnet image is the SDK $DOTNET" DOTNET_IMAGE "$DOTNET"
+	check_tag "the jvm image is the JDK $JDK" JVM_IMAGE "jdk-${JDK//+/-}"
+	check_tag "and Kotlin $KOTLIN" JVM_IMAGE "kotlin-$KOTLIN"
+	# TeaVM's own jars are taken from the jvm image's Gradle cache, so its pin is held to the tag too.
+	check_tag "and TeaVM $TEAVM" JVM_IMAGE "teavm-$TEAVM"
+	check_tag "the ruby image is YARD $YARD" RUBY_IMAGE "yard-$YARD"
+	check_tag "the python image is componentize-py $COMPONENTIZE" PYTHON_IMAGE "componentize-py-$COMPONENTIZE"
+	check_tag "the purescript image is purs $PURS" PURESCRIPT_IMAGE "$PURS"
+	check_tag "and spago $SPAGO" PURESCRIPT_IMAGE "spago-$SPAGO"
+	check_tag "the wasm-components image is the C++ arm's wit-bindgen $WIT_BINDGEN" WASM_COMPONENTS_IMAGE \
+		"wit-bindgen-$WIT_BINDGEN"
+	check_tag "and the Swift arm's $SWIFT_WIT_BINDGEN" WASM_COMPONENTS_IMAGE "wit-bindgen-$SWIFT_WIT_BINDGEN"
+	check_tag "and the Rust arm's lock's $RUST_WIT_BINDGEN" WASM_COMPONENTS_IMAGE "wit-bindgen-$RUST_WIT_BINDGEN"
+	# The Node gg's pipeline provisions is the devcontainer's.
+	node_pin="$(sed -n 's/^readonly NODE_VERSION="\(.*\)"$/\1/p' "$CI_DIR/gg-ci-toolchains.sh")"
+	check_equal "gg-ci-toolchains.sh's Node is the devcontainer's NODE_VERSION" \
+		"$(sed -n 's/^  NODE_VERSION: *\([^ ]*\) *$/\1/p' "$compose")" "$node_pin"
+else
+	echo "  skip the image tags: no devcontainer compose file at $compose"
+fi
 
 echo "gg-image-toolchains.test.sh: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ]

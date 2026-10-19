@@ -8,7 +8,7 @@
 //! takes the source under its own name at offset zero, so a program writes its own `import` lines,
 //! declares whatever top-level names it likes, and reads its own line numbers back out of any
 //! failure. That is what
-//! `apps/docs/src/content/docs/gg/responses-as-code/invariants.md` requires of every arm.
+//! `docs/responses-as-code/invariants.md` requires of every arm.
 //!
 //! The engine this replaces (StarlingMonkey, through `componentize-js`) cannot do it at any setting.
 //! It has no way to evaluate module source at run time at all: `import()` of a `data:` URL, a

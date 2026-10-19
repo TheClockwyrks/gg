@@ -38,7 +38,7 @@
 //! packages as well, and what an environment is made of is the whole package set rather than the
 //! one library that happened to be missing. `containers/build.sh` names them and re-derives the
 //! grouping on every gated build; the documentation page
-//! (`apps/docs/src/content/docs/gg/languages/selfcheck.md`) is where that placement is argued.
+//! (`docs/languages/selfcheck.md`) is where that placement is argued.
 //!
 //! # Why it drives the real bootstrap turn
 //!

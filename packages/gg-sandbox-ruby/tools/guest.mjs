@@ -137,7 +137,7 @@ const Compiler = opalCompiler();
  * to learn: **everything gg compiles is arity-checked**. What gg does not compile is Opal's own
  * corelib — `Array`, `Hash`, `String`, `Integer` arrive precompiled inside `opal-runtime`'s
  * `opal.js` and are checked by whatever Opal built them with, which is nothing. That boundary is
- * recorded for the model in `apps/docs/src/content/docs/gg/languages/ruby.md` beside the other
+ * recorded for the model in `docs/languages/ruby.md` beside the other
  * Opal divergences rather than papered over here.
  */
 function compile(source, file, requirable) {

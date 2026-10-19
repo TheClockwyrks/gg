@@ -1,0 +1,44 @@
+# Cargo's build output.
+/target/
+
+# The installed npm packages, put back by `npm ci`, and what a package builds.
+node_modules/
+dist/
+
+# Tool caches.
+.cspellcache
+__pycache__/
+*.pyc
+/ci/.venv/
+/ci/.pytest_cache/
+.ruff_cache/
+
+# Editor and operating system droppings.
+.DS_Store
+*~
+
+# Environment files hold secrets.
+.env
+.env.*
+!.env.*.example
+
+# Scratch work, so none of it is offered to a commit.
+tmp/
+
+# What this repository alone ignores.
+**/*.rs.bk
+# gg's checkers directory holds five files of gg's own source, the three
+# hand-written Java compiler drivers and the two JVM arms' pin declarations;
+# everything else a build writes there is generated.
+/crates/gg/src/sandbox/checkers/*
+!/crates/gg/src/sandbox/checkers/java.compiler.java
+!/crates/gg/src/sandbox/checkers/java.toolchain.json
+!/crates/gg/src/sandbox/checkers/jvm.backend.java
+!/crates/gg/src/sandbox/checkers/kotlin.compiler.java
+!/crates/gg/src/sandbox/checkers/kotlin.toolchain.json
+/crates/gg/src/sandbox/guests/
+# What an arm's build vendors or compiles, and the JVM's class files.
+.vendor/
+*.class
+# A gg run's own state directory, wherever a run was pointed.
+.gg/

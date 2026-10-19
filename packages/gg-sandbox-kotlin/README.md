@@ -167,5 +167,5 @@ summary — fails on the author instead.
 - `crates/gg/src/sandbox/language/kotlin.surface.test.rs` — every gg tool driven through
   that membrane from its Kotlin spelling, the agreement gate over the generated catalogue,
   and every declared library driven into the real compiler.
-- [`gg/languages/kotlin.md`](../../apps/docs/src/content/docs/gg/languages/kotlin.md) —
+- [`gg/languages/kotlin.md`](../../docs/languages/kotlin.md) —
   the prose, including what a program is and what this toolchain is not.

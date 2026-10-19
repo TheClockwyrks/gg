@@ -2,7 +2,10 @@
 #
 # Project gg's model-probe fixtures into the backend crate.
 #
-#   scripts/gg-probe-fixtures.sh [OUT_DIR]   # default: crates/backend/src/probe/fixtures
+#   scripts/gg-probe-fixtures.sh [OUT_DIR]   # default: ../crates/backend/src/probe/fixtures
+#
+# The backend is not in this repository. The default is its crate in the superrepo's checkout that
+# holds this one as its `gg/` submodule; a backend checked out anywhere else is named by OUT_DIR.
 #
 # WHAT IT WRITES. One `<language>.json` per registered program language: the responses-as-code
 # turn-1 conversation the backend's model probe replays for each of its cases — the real system
@@ -15,7 +18,7 @@
 # WHY THE OUTPUT IS COMMITTED. The backend must not depend on `test-cabinet-gg` (see
 # `scripts/gg-reference.sh` for the whole argument), and the probe embeds its request at compile
 # time via `include_str!`, so the projection crosses the crate boundary as committed JSON under
-# `crates/backend/src/probe/fixtures/`. Re-run this script — and commit the diff — whenever the
+# the backend's `crates/backend/src/probe/fixtures/`. Re-run this script — and commit the diff — whenever the
 # system prompt, an arm's catalogue, or a probe case changes.
 #
 # WHAT IT NEEDS: whatever BUILDING gg needs (all eleven toolchains; the devcontainer has them).
@@ -25,7 +28,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-OUT_DIR="${1:-crates/backend/src/probe/fixtures}"
+OUT_DIR="${1:-../crates/backend/src/probe/fixtures}"
+if [ ! -d "$(dirname "$OUT_DIR")" ]; then
+	echo "error: no backend probe module at $(dirname "$OUT_DIR"), so there is nowhere to write the fixtures." >&2
+	echo "       Name the backend's crates/backend/src/probe/fixtures directory as the argument." >&2
+	exit 1
+fi
 
 cargo run --quiet -p test-cabinet-gg --bin gg -- probe-fixtures --out "$OUT_DIR"
 

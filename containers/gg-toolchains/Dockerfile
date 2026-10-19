@@ -116,7 +116,7 @@
 #    may install a library an arm's own vendoring is supposed to supply — see the C# block, whose
 #    `apt` line deliberately does not carry ICU, which is what makes that installer's own check
 #    honest — and the gate that settles the question for real is
-#    [`gg selfcheck`](../../apps/docs/src/content/docs/gg/languages/selfcheck.md), run inside a
+#    [`gg selfcheck`](../../docs/languages/selfcheck.md), run inside a
 #    BUILT `-gg` variant of each ENVIRONMENT — `sprite-gg`, `base-wasm-gg`, `voxel-gg`,
 #    `full-stack-3d-gg`, `blender-gg` — before any of them is published.
 #
