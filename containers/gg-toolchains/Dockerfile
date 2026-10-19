@@ -5,21 +5,17 @@
 # source, exactly as `containers/tools` does, so the toolchains land in one place and
 # every gg run image copies the same tree.
 #
-# It IS published, though, and this file is where that fact belongs — `containers/build.sh`
-# and `containers/README.md` both point a reader here. `build.sh` pushes it under `PUSH=1`
-# and the Azure pipeline's run-image manifest job fuses its two arch tags, so the exact tree baked into every `-gg` variant is
-# pullable and pinned by digest on its own terms; the argument for paying for that is where
-# `GG_TOOLCHAINS_IMAGE` is defined in `build.sh`, and is not repeated here.
+# It IS published, though, as part of a gg release: on a `v*` tag gg's pipeline builds it
+# natively on each architecture and fuses the two into the multi-arch
+# `testcabinet.azurecr.io/test-cabinet-gg-toolchains:<version>`, the version without the
+# tag's `v` (scripts/ci/gg-toolchains-image.sh, run by the `release` stage of
+# .azure/project/stages.yml). The `-gg` run images under `containers/` in
+# `microservice-driver` copy `/opt/gg` from the tag of the release the driver pins, so the
+# tree a run compiles in and the gg that drives the compilers are one release, and the exact
+# tree baked into every `-gg` variant is pullable and pinned on its own terms.
 #
-# Published and yet absent from `containers/image-names.sh`, which looks like a
-# contradiction and is not: that list is the set of images a RUN RESOLVES, and nothing
-# resolves this one. The obstacle to listing it anyway is `build.sh` rather than the Rust
-# suite — `every_resolvable_image_is_one_the_build_publishes` in
-# `crates/driver/src/harness.test.rs` keeps a `NOT_A_RUN_IMAGE` exception list, which already
-# holds `base` for exactly this shape — but `build_one` dispatches on that list BY NAME, so
-# an entry here would send `./build.sh` (and `make run-images`) through `build_asset_image`
-# for something that is not one. That is why the manifest job fuses this image by name
-# instead of picking it up from the loop.
+# Nothing resolves this image for a run, so it is absent from the driver's list of run
+# images: it is only ever a source for `COPY --from`.
 #
 # Why this exists
 # ---------------
@@ -185,7 +181,7 @@ RUN mkdir -p /opt/gg/toolchains/bin
 # compiled by — externs are a compiler-version-private format, so a `purs` in this image
 # one patch away from the one that built the tree does not compile a model's program at all,
 # it fails on every program. This block used to restate both pins as `ARG` defaults that
-# `containers/build.sh` then overrode with the real ones; an override is only as good as the
+# the build wrapper then overrode with the real ones; an override is only as good as the
 # caller that remembers it, and the default was a second answer sitting in the tree waiting
 # for a `docker build -f` that skipped the wrapper. So this runs
 # `scripts/ci/install-purescript.sh` — the same script a developer's and a CI machine run —

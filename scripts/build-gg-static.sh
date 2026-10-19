@@ -13,14 +13,12 @@
 # the aarch64 devcontainer it yields an aarch64-musl gg; on x86_64 CI an x86_64-musl
 # gg.
 #
-# WHO RUNS THIS, AND HOW MANY gg BINARIES A COMMIT HAS. In CI, exactly one: the gates
-# stage's `gg_<arch>` job runs scripts/ci/gg-dist.sh, which runs this, and the resulting
-# `gg-<arch>` artifact is what the run images are self-checked against, what the driver and
-# backend images bake (scripts/ci/gg-prebuilt.sh stages it as the `gg-build` named build
-# context) and what is uploaded to the `gg-releases` container. The `gg-build` stage of
-# deployments/images/services.Dockerfile also runs this script, and that is the OFFLINE path
-# — `make -C deployments/local images` builds gg inside the image with no pipeline artifact
-# to take it from — so the gg an image bakes always matches the image's platform either way.
+# WHO RUNS THIS, AND HOW MANY gg BINARIES A COMMIT HAS. In CI, exactly one per
+# architecture: the gates stage's `gg_<arch>` job of gg's pipeline runs
+# scripts/ci/gg-dist.sh, which runs this, and on a `v*` tag the resulting `gg-<arch>`
+# artifact is what is uploaded to the `gg-releases` container, the release the driver and
+# backend images of The Test Cabinet fetch for the version the driver pins and the run
+# images are self-checked against. A developer runs it to try a gg of their own.
 #
 # Usage:
 #   scripts/build-gg-static.sh [OUT_PATH]

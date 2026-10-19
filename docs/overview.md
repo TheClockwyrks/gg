@@ -354,6 +354,13 @@ of any crate's version, and `gg --version`, read out of the run container, is
 what a run records as its `subject.harnessVersion`. See [Releasing
 `gg`](/development/releasing/#releasing-gg).
 
+The same tag publishes the toolchain tree the `-gg` run images copy, as the
+multi-arch image `testcabinet.azurecr.io/test-cabinet-gg-toolchains:<version>`,
+tagged with the version alone, without the release tag's `v`, so the driver's
+one pin names the binary, the reference documents and the toolchains of one
+release. gg's pipeline builds the image on both architectures in its `release`
+stage and uploads the release objects only once the image is pushed.
+
 ## Capabilities
 
 Each capability has its own page. The grouping below is editorial rather than a

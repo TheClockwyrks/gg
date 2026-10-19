@@ -114,7 +114,7 @@ gg-reference.tar.gz" "$(ls "$tmp/dist-arm")"
 check_equal "whose tarball holds the same reference" \
 	"gg-reference/
 gg-reference/index.md" "$(tar -tzf "$tmp/dist-arm/gg-reference.tar.gz" | sort)"
-check_contains "and prints the binary's digest, which gg-prebuilt.sh prints on the consuming side" \
+check_contains "and prints the binary's digest, which ties a release object back to this build" \
 	"$(sha256sum "$tmp/dist-arm/gg-aarch64-unknown-linux-musl" | cut -d' ' -f1)" "$out"
 
 out="$(cd "$tmp" && run x86_64 relative/out)"
