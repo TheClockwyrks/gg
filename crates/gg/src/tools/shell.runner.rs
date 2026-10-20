@@ -31,7 +31,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,8 +41,9 @@ use tokio::process::Command;
 
 use super::ToolFailure;
 
-/// After a timeout kill, how long to wait for the reader tasks to drain whatever was
-/// already captured before giving up (a forked grandchild may hold the pipe open).
+/// Once the command has exited or been killed, how long to wait for both pipes to close before
+/// reporting what was captured. A process the command left running in the background (or one that
+/// left its process group) can hold a pipe open indefinitely; the call does not wait on it.
 const OUTPUT_GRACE: Duration = Duration::from_millis(250);
 
 /// One command line, as handed to whatever is going to run it.
@@ -161,7 +162,12 @@ pub trait ShellRunner: Send + Sync + std::fmt::Debug {
 }
 
 /// The production [`ShellRunner`]: `sh -c` in the requested directory, its own process group, both
-/// pipes drained concurrently with the wait, killed on the request's ceiling.
+/// pipes drained concurrently with the wait, the whole group killed on the request's ceiling.
+///
+/// The call returns at most [`OUTPUT_GRACE`] after `sh` exits or is killed, whatever is still
+/// holding the pipes. On an ordinary exit nothing is killed: a process the command deliberately
+/// sent to the background (a dev server) keeps running, and its output keeps being drained — and
+/// discarded — so it never meets a closed pipe.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealShellRunner;
 
@@ -215,38 +221,39 @@ impl ShellRunner for RealShellRunner {
         };
 
         // Drain both pipes concurrently with the wait so a command that fills a pipe
-        // buffer cannot deadlock, and partial output survives a timeout kill.
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
-        let out_task = tokio::spawn(async move { read_stream(&mut stdout).await });
-        let err_task = tokio::spawn(async move { read_stream(&mut stderr).await });
+        // buffer cannot deadlock, and partial output survives a timeout kill. Each reader
+        // appends to a capture this side can snapshot without waiting for the pipe's EOF.
+        let out_capture = Capture::default();
+        let err_capture = Capture::default();
+        let out_task = tokio::spawn(drain(child.stdout.take(), out_capture.clone()));
+        let err_task = tokio::spawn(drain(child.stderr.take(), err_capture.clone()));
 
         let waited = tokio::time::timeout(timeout, child.wait()).await;
 
-        let timed_out = waited.is_err();
-        if timed_out {
-            // The command overran its budget; signal a kill so it cannot wedge the run.
-            // We do not `.await` the kill (or the reader tasks unboundedly): a forked
-            // grandchild can keep the pipe's write end open past the kill, so we bound the
-            // final output collection with a short grace below rather than block on it.
-            let _ = child.start_kill();
+        if waited.is_err() {
+            // The command overran its ceiling: kill its whole process group, so a grandchild
+            // `sh` forked cannot outlive the call holding the pipe. The kill is not awaited.
+            kill_process_group(&mut child);
         }
 
-        // Collect the captured output. On a clean exit the pipes are already closed, so the
-        // readers finish immediately; on a timeout a lingering grandchild might hold a pipe
-        // open, so we wait only a short grace for whatever was captured and then move on.
-        let collect = async {
-            let stdout = out_task.await.unwrap_or_default();
-            let stderr = err_task.await.unwrap_or_default();
-            (stdout, stderr)
-        };
-        let (stdout, stderr) = if timed_out {
-            tokio::time::timeout(OUTPUT_GRACE, collect)
-                .await
-                .unwrap_or_default()
-        } else {
-            collect.await
-        };
+        // Collect the captured output, bounded either way. On an ordinary exit the readers
+        // usually see EOF at once; but a process the command sent to the background (`npm run
+        // dev &`) inherited the pipe and holds it open for as long as it lives, and on a timeout
+        // a process that left the group may do the same. So the call waits at most a short grace
+        // for the EOF, then reports what was captured by then.
+        //
+        // The readers are deliberately NOT aborted when the grace runs out: they are left
+        // draining, detached, until the pipe closes. Closing the read end instead would hand the
+        // backgrounded process `SIGPIPE` (or `EPIPE`) the next time it writes — a server the
+        // model started on purpose would die of the call having returned. Nor is the group
+        // killed on an ordinary exit, for the same reason.
+        let _ = tokio::time::timeout(OUTPUT_GRACE, async {
+            let _ = out_task.await;
+            let _ = err_task.await;
+        })
+        .await;
+        let stdout = out_capture.take();
+        let stderr = err_capture.take();
 
         let status = match waited {
             Ok(Ok(status)) => ShellStatus::Exited {
@@ -268,19 +275,86 @@ impl ShellRunner for RealShellRunner {
     }
 }
 
-/// Read a captured pipe to EOF as lossy UTF-8 (build output is not guaranteed valid
-/// UTF-8). A `None` handle (unexpected) reads as empty.
-async fn read_stream<R>(reader: &mut Option<R>) -> String
+/// Kill a timed-out command's whole process group — `sh` and everything it started that is still
+/// in the group — with `SIGKILL`.
+///
+/// The command was spawned with [`process_group(0)`](std::os::unix::process::CommandExt::process_group),
+/// so `sh`'s pid is the group's id. The child has not been reaped (its wait timed out), so that id
+/// cannot have been reused by an unrelated group. Should the group signal fail for any reason, `sh`
+/// itself is still killed, which is what the runner did before it signalled the group.
+#[cfg(unix)]
+fn kill_process_group(child: &mut tokio::process::Child) {
+    let signalled = child
+        .id()
+        .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        .is_some_and(|pgid| {
+            // SAFETY: `kill` takes two integers and touches no memory of this process; a negative
+            // pid addresses the process group whose id is its absolute value.
+            unsafe { libc::kill(-pgid, libc::SIGKILL) == 0 }
+        });
+    if !signalled {
+        let _ = child.start_kill();
+    }
+}
+
+/// Where there are no process groups, kill the one process there is.
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+}
+
+/// One pipe's captured bytes, shared between the reader draining the pipe and the runner reporting
+/// on it.
+///
+/// Shared rather than returned from the reader, because the runner reports after at most
+/// [`OUTPUT_GRACE`] whether or not the pipe has closed: what a reader still running has already read
+/// is part of the command's output. Once [taken](Self::take), the reader keeps reading — so the
+/// writer never meets a closed pipe — but discards what it reads, so a server left running in the
+/// background cannot grow a buffer nobody will read.
+#[derive(Debug, Clone, Default)]
+struct Capture(Arc<Mutex<CaptureState>>);
+
+#[derive(Debug, Default)]
+struct CaptureState {
+    bytes: Vec<u8>,
+    taken: bool,
+}
+
+impl Capture {
+    /// Append `chunk`, unless the capture has already been reported.
+    fn push(&self, chunk: &[u8]) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.taken {
+            state.bytes.extend_from_slice(chunk);
+        }
+    }
+
+    /// Everything captured so far, as lossy UTF-8 (build output is not guaranteed valid UTF-8);
+    /// from here on the reader discards what it reads.
+    fn take(&self) -> String {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.taken = true;
+        let bytes = std::mem::take(&mut state.bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+/// Read a captured pipe to EOF into `capture`. A `None` handle (unexpected) reads as empty, and a
+/// read error ends the drain keeping whatever was captured before it.
+async fn drain<R>(reader: Option<R>, capture: Capture)
 where
     R: AsyncReadExt + Unpin,
 {
-    let Some(reader) = reader.as_mut() else {
-        return String::new();
+    let Some(mut reader) = reader else {
+        return;
     };
-    let mut buf = Vec::new();
-    // A read error mid-stream still yields whatever was captured before it.
-    let _ = reader.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).into_owned()
+    let mut chunk = vec![0u8; 8 * 1024];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => capture.push(&chunk[..n]),
+        }
+    }
 }
 
 /// A [`ShellRunner`] that starts nothing: it records every [request](ShellRequest) it is handed and
