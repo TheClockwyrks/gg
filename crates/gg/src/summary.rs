@@ -749,6 +749,11 @@ impl SessionSummaryTracker {
                     GgProviderFault::FailedCall | GgProviderFault::Unavailable => {}
                 }
             }
+            // A heartbeat says an agent is alive while it waits, and nothing else: the wait it
+            // reports is already measured by the event that ends it (a prompt's duration, a tool
+            // result, a code execution), so folding the beats would count the same time twice. An
+            // arm of its own so that stays a decision rather than a fall-through.
+            GgTelemetryKind::Heartbeat { .. } => {}
             // lifecycle, assistant text and tool calls (their results are counted above), the
             // knowledge-state snapshots (skills/memories/tasks), agent-status/worktree/
             // succession transitions, diagnostic logs, and the terminal summary/ended events

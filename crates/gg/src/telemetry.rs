@@ -25,13 +25,28 @@
 //! individually attributable. A subagent dispatched against a board
 //! [issue](test_cabinet_contracts::gg::GgBoardIssue) is [scoped to that issue](Emitter::for_agent_on_issue)
 //! so its whole stream also carries the `issue_id` it was dispatched for.
+//!
+//! # Heartbeats
+//!
+//! An agent waiting on something slow — a model request, a tool call, its program's execution, a
+//! subagent or an issue — would otherwise be silent for as long as the wait lasts, and a silent
+//! stream is what the driver's idle watchdog reads as a stalled run. So every such wait is run
+//! through [`Emitter::while_waiting`], which emits a
+//! [`Heartbeat`](GgTelemetryKind::Heartbeat) every [`HEARTBEAT_INTERVAL`] of it, saying what the
+//! agent waits on and for how long (see
+//! [the telemetry overview](https://docs.testcabinet.ai/gg/telemetry/overview/)). Heartbeats are
+//! activity, not record: the [session summary](crate::summary) and the
+//! [turn timing](crate::turn_timing) fold nothing from them.
 
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use test_cabinet_contracts::gg::{
     GG_SHELL_EVENT_STREAM_CHARS, GgLimitBreach, GgProgramLanguage, GgPromptRef, GgRunLimits,
-    GgSessionSummary, GgTelemetryEvent, GgTelemetryKind,
+    GgSessionSummary, GgTelemetryEvent, GgTelemetryKind, GgWaitKind,
 };
 use test_cabinet_contracts::metrics::{Cost, TokenCounts};
 use time::OffsetDateTime;
@@ -65,6 +80,58 @@ impl EventSink for StdoutSink {
         let mut stdout = std::io::stdout().lock();
         if let Err(err) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
             eprintln!("gg: failed to write telemetry event: {err}");
+        }
+    }
+}
+
+/// How often an agent that is [waiting](Emitter::while_waiting) says so: one
+/// [`Heartbeat`](GgTelemetryKind::Heartbeat) per agent at most every this long, the first one this
+/// long into the wait.
+///
+/// The documented cadence — "at most every 60 s" — and well inside the driver's idle window, so a
+/// long wait never reads as a stalled run. A test that wants a shorter beat sets one on the base
+/// emitter with `Emitter::with_heartbeat_interval` rather than changing this.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The run-wide heartbeat clock: the interval every wait beats at, and when each agent last beat.
+///
+/// Shared (an [`Arc`]) by the base emitter and every [agent-scoped](Emitter::for_agent) child, and
+/// keyed by agent id, so the guard holds **per agent** however many emitters an agent's waits go
+/// through: nested waits (a tool call that is itself a subagent wait, a program whose call runs a
+/// command) and parallel ones each run a ticker, and a tick only becomes a heartbeat when that agent
+/// has not beaten for a whole interval. Whichever of an agent's waits ticks first therefore labels the
+/// heartbeat — in practice the one that began first, which for nested waits is the outermost.
+struct HeartbeatClock {
+    /// The interval every wait ticks at: [`HEARTBEAT_INTERVAL`] in a run.
+    interval: Duration,
+    /// When each agent (by id; `None` for an unscoped emitter) last emitted a heartbeat.
+    last: Mutex<BTreeMap<Option<String>, tokio::time::Instant>>,
+}
+
+impl HeartbeatClock {
+    /// A clock beating every `interval`, no agent having beaten yet.
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Whether `agent` may beat at `now`, recording the beat if so: true when it never has, or not
+    /// for a whole interval. Check and record happen under one lock, so two of the agent's waits
+    /// ticking at the same instant produce one heartbeat.
+    fn claim(&self, agent: Option<&str>, now: tokio::time::Instant) -> bool {
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = agent.map(str::to_string);
+        match last.get(&key) {
+            Some(previous) if now.saturating_duration_since(*previous) < self.interval => false,
+            _ => {
+                last.insert(key, now);
+                true
+            }
         }
     }
 }
@@ -113,6 +180,10 @@ pub struct Emitter {
     /// [agent-scoped](Self::for_agent) emitter gets a fresh pool so its stream always
     /// carries the definitions its own prompts reference.
     messages: Arc<MessagePool>,
+    /// The run-wide [heartbeat clock](HeartbeatClock) [`while_waiting`](Self::while_waiting) beats
+    /// against. Shared like [`summary`](Self::summary), and keyed by agent inside, so an agent beats
+    /// at most once per interval whichever of its emitters its waits run through.
+    heartbeats: Arc<HeartbeatClock>,
 }
 
 impl Emitter {
@@ -135,7 +206,21 @@ impl Emitter {
             sink: Arc::from(sink),
             summary: Arc::new(SessionSummaryTracker::new()),
             messages: Arc::new(MessagePool::new()),
+            heartbeats: Arc::new(HeartbeatClock::new(HEARTBEAT_INTERVAL)),
         }
+    }
+
+    /// This emitter with its waits beating every `interval` instead of [`HEARTBEAT_INTERVAL`].
+    ///
+    /// Set on the **base** emitter, before any agent's is derived from it: every
+    /// [agent-scoped](Self::for_agent) child shares the clock the base holds, so a test that wants a
+    /// short beat across a whole session sets it once here. It starts a fresh clock, so no beat
+    /// recorded against the old one carries over. Test-only: a run always beats at the documented
+    /// cadence.
+    #[cfg(test)]
+    pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeats = Arc::new(HeartbeatClock::new(interval));
+        self
     }
 
     /// Derive an emitter scoped to the agent `agent_id` (spawned by `parent_agent_id`),
@@ -172,6 +257,7 @@ impl Emitter {
             // prompts reference (the console reduces the log per agent), so pools are never
             // shared the way the run-wide summary is.
             messages: Arc::new(MessagePool::new()),
+            heartbeats: Arc::clone(&self.heartbeats),
         }
     }
 
@@ -212,6 +298,56 @@ impl Emitter {
         match serde_json::to_string(&event) {
             Ok(line) => self.sink.write_line(&line),
             Err(err) => eprintln!("gg: failed to serialize telemetry event: {err}"),
+        }
+    }
+
+    /// Await `wait`, emitting a [`Heartbeat`](GgTelemetryKind::Heartbeat) on this agent's stream
+    /// every [interval](HEARTBEAT_INTERVAL) it lasts, and return what it produced.
+    ///
+    /// Each heartbeat names what the agent waits on (`waiting_on`, plus an optional `detail`: the
+    /// tool's name, the subagents or the issue) and how long this wait has lasted. The first beat
+    /// comes one interval into the wait, so a wait shorter than that says nothing; a wait that ends
+    /// exactly on a beat returns rather than beating. The ticker lives and dies with the wait — it
+    /// is polled beside it, never spawned — so a cancelled wait stops beating at once.
+    ///
+    /// One agent never beats more than once per interval: its nested and parallel waits share one
+    /// run-wide clock, keyed by this emitter's agent id, and a tick is dropped
+    /// when the agent has already beaten within the interval. A dropped tick is not owed — the next
+    /// one beats if the agent is still quiet by then.
+    pub async fn while_waiting<F: Future>(
+        &self,
+        waiting_on: GgWaitKind,
+        detail: Option<String>,
+        wait: F,
+    ) -> F::Output {
+        let clock = Arc::clone(&self.heartbeats);
+        let period = clock.interval;
+        let started = tokio::time::Instant::now();
+        let mut ticks = tokio::time::interval_at(started + period, period);
+        // A tick missed while the runtime was busy is not made up in a burst: the beat says the
+        // agent is alive, and one late beat says it as well as three.
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut wait = std::pin::pin!(wait);
+        loop {
+            tokio::select! {
+                // The wait first, so one that is ready on a beat returns instead of reporting it
+                // is still waiting.
+                biased;
+                output = &mut wait => return output,
+                _ = ticks.tick() => {
+                    let now = tokio::time::Instant::now();
+                    if clock.claim(self.agent_id.as_deref(), now) {
+                        self.emit(GgTelemetryKind::Heartbeat {
+                            waiting_on,
+                            waited_ms: u64::try_from(
+                                now.saturating_duration_since(started).as_millis(),
+                            )
+                            .unwrap_or(u64::MAX),
+                            detail: detail.clone(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -562,3 +698,7 @@ pub(crate) fn plural(count: usize, noun: &str) -> String {
 #[cfg(test)]
 #[path = "telemetry.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "telemetry.heartbeat.test.rs"]
+mod heartbeat_tests;

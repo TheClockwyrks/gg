@@ -687,3 +687,108 @@ fn resolved_config() -> LoopGuardConfig {
         max_response_chars: 0,
     }
 }
+
+/// Every heartbeat on the sink, as `(agentId, waitedMs, detail)`, asserting each is a model
+/// request's.
+fn model_request_beats(sink: &CollectingSink) -> Vec<(Option<String>, u64, Option<String>)> {
+    sink.events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            GgTelemetryKind::Heartbeat {
+                waiting_on,
+                waited_ms,
+                detail,
+            } => {
+                assert_eq!(
+                    waiting_on,
+                    test_cabinet_contracts::gg::GgWaitKind::ModelRequest
+                );
+                Some((event.agent_id, waited_ms, detail))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A reply that keeps its agent waiting two and a half minutes beats on the stream of the agent
+/// that took the client up, twice, naming the model — so a provider slow to answer never reads as a
+/// stalled run, whatever made the request (a turn, or a compaction's summary).
+#[tokio::test(start_paused = true)]
+async fn a_slow_reply_beats_on_the_agents_stream() {
+    let (client, requests) = default_client(RetryPolicy::default(), Duration::ZERO, || {
+        quiet_then(Duration::from_secs(150), ONE_CHUNK_TOOL_CALL)
+    });
+    let sink = CollectingSink::new();
+    client.announce_retries_on(
+        &Emitter::with_sink(None, Box::new(sink.clone())).for_agent("root", None),
+    );
+
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_the_one_chunk_reply(outcome);
+    let model = Some("google/gemini-4-argon".to_string());
+    let root = Some("root".to_string());
+    assert_eq!(
+        model_request_beats(&sink),
+        vec![
+            (root.clone(), 60_000, model.clone()),
+            (root, 120_000, model)
+        ]
+    );
+}
+
+/// The beat covers the whole request, the retry schedule's attempts and the delays between them
+/// included: a request that fails twice and succeeds on the third attempt, each attempt's head held
+/// back fifty seconds, is one wait of over two and a half minutes — no single attempt long enough to
+/// beat on its own.
+#[tokio::test(start_paused = true)]
+async fn the_beat_spans_the_retry_schedule() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let client = OpenRouterClient::new(
+        "http://gateway.invalid/api/v1",
+        reqwest::Client::new(),
+        "google/gemini-4-argon",
+        "sk-test",
+        two_retries(),
+        None,
+    )
+    .with_head_delay(Duration::from_secs(50))
+    .answered_by(move |_| {
+        let attempt = seen.fetch_add(1, Ordering::SeqCst);
+        let builder = http::Response::builder();
+        if attempt < 2 {
+            builder
+                .status(503)
+                .body(reqwest::Body::from("overloaded"))
+                .expect("a well-formed response")
+                .into()
+        } else {
+            builder
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(reqwest::Body::from(ONE_CHUNK_TOOL_CALL))
+                .expect("a well-formed response")
+                .into()
+        }
+    });
+    let sink = CollectingSink::new();
+    client.announce_retries_on(
+        &Emitter::with_sink(None, Box::new(sink.clone())).for_agent("root", None),
+    );
+
+    let started = tokio::time::Instant::now();
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_the_one_chunk_reply(outcome);
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_secs(150), "{elapsed:?}");
+    let beats = model_request_beats(&sink);
+    assert_eq!(
+        beats.iter().map(|beat| beat.1).collect::<Vec<_>>(),
+        vec![60_000, 120_000],
+        "{beats:?}"
+    );
+}

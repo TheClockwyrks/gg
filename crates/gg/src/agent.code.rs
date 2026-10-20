@@ -1625,7 +1625,14 @@ async fn run_code_program(
         (merged, chain, api)
     });
 
-    match sandbox.await {
+    // The program's whole execution is one wait for the loop: the agent beats through it, and a
+    // command or a subagent wait the program makes inside it beats under the same per-agent guard,
+    // so a long program never reads as a stalled run and never beats twice in an interval.
+    match turn
+        .emitter
+        .while_waiting(GgWaitKind::Program, None, sandbox)
+        .await
+    {
         // The sandbox ran (to a result, a throw, or a ceiling): reclaim the state the api carried so
         // the loop gets its live window, skills/docs runtimes and delegation context back.
         Ok((outcome, chain, api)) => {
