@@ -159,7 +159,7 @@ use test_cabinet_contracts::gg::{
     GgCapabilitySet, GgContextAction, GgContextSource, GgHookAgentKind, GgHookEvent,
     GgIssueReviewPhase, GgLimitBreach, GgLimitKind, GgProgramLanguage, GgProviderCandidate,
     GgReasoning, GgReviewer, GgRosterEntry, GgRunLimits, GgSlotBinding, GgSubagentScope,
-    GgTelemetryKind, GgUndocumentedCalls, GgUsageFigure, MAX_OPENING_TREE_DEPTH,
+    GgTelemetryKind, GgUndocumentedCalls, GgUsageFigure, GgWaitKind, MAX_OPENING_TREE_DEPTH,
     PARAM_SIGNAL_THRESHOLD_PERCENT, PARAM_SKILLS_DIR, PARAM_TOP_FILE_VIEWS, PARAM_WINDOW_LIMIT,
     PROJECT_MANAGEMENT_PARAM_MERGE_AGENT,
 };
@@ -3060,23 +3060,35 @@ async fn wait_for_issue_by_id(
             // fires if gg breaks meanwhile, which is the only other way out: a faulted run stops
             // dispatching, so the issue this is suspended on may never move again, and an agent
             // inside a tool call reaches no turn boundary to read the latch at.
-            let faulted = tokio::select! {
-                // Biased, and the fault first, for the reason the latch keeps the *first* fault: a
-                // run that broke and then settled this issue settled it as a consequence of the
-                // break, and both arms are ready at once every time a wind-down fails the very
-                // issue somebody was waiting on. An unbiased pick would report the cause on some
-                // runs and the consequence on others, from one recorded run to the next.
-                biased;
-                () = project.orch.fault.until_raised() => {
-                    project.orch.release_issue_wait_on_fault(token);
-                    // Still awaited, because the release goes through the scheduler: this agent
-                    // resumes when it is granted a slot, exactly as a woken one does, rather than
-                    // running on beside the agents that hold them.
-                    let _ = rx.await;
-                    project.orch.fault.raised().map(str::to_string)
+            // The whole suspension is a wait on a subagent — the one the issue is assigned to — so
+            // the agent beats through it, however long the issue takes.
+            let suspended = async {
+                tokio::select! {
+                    // Biased, and the fault first, for the reason the latch keeps the *first*
+                    // fault: a run that broke and then settled this issue settled it as a
+                    // consequence of the break, and both arms are ready at once every time a
+                    // wind-down fails the very issue somebody was waiting on. An unbiased pick
+                    // would report the cause on some runs and the consequence on others, from one
+                    // recorded run to the next.
+                    biased;
+                    () = project.orch.fault.until_raised() => {
+                        project.orch.release_issue_wait_on_fault(token);
+                        // Still awaited, because the release goes through the scheduler: this
+                        // agent resumes when it is granted a slot, exactly as a woken one does,
+                        // rather than running on beside the agents that hold them.
+                        let _ = rx.await;
+                        project.orch.fault.raised().map(str::to_string)
+                    }
+                    _ = &mut rx => None,
                 }
-                _ = &mut rx => None,
             };
+            let faulted = emitter
+                .while_waiting(
+                    GgWaitKind::Subagent,
+                    Some(format!("issue `{issue_id}`")),
+                    suspended,
+                )
+                .await;
             if project.orch.multi_agent() {
                 emitter.emit(agent_status(GgAgentStatus::Running));
             }
@@ -5348,8 +5360,11 @@ async fn await_children(
         exclusive.as_deref(),
         &sub.ctx.hold,
     ) {
-        emitter.emit(agent_blocked_on(waited_subagents_condition(awaited_ids)));
-        let _ = rx.await;
+        let condition = waited_subagents_condition(awaited_ids);
+        emitter.emit(agent_blocked_on(condition.clone()));
+        let _ = emitter
+            .while_waiting(GgWaitKind::Subagent, Some(condition), rx)
+            .await;
         emitter.emit(agent_status(GgAgentStatus::Running));
     }
 
@@ -7276,15 +7291,22 @@ impl Agent {
             // decide when to stop asking.
             let response = loop {
                 let attempt_started = Instant::now();
-                let recoverable = match complete_with_vision_recovery(
-                    client,
-                    context,
-                    &tools,
-                    submit_tool.as_ref(),
-                    &tool_ctx.vision.support,
-                    emitter,
-                )
-                .await
+                // Beating while it waits, so a slow provider — or the client's own retry schedule,
+                // which runs inside this one call — never reads as a stalled run.
+                let recoverable = match emitter
+                    .while_waiting(
+                        GgWaitKind::ModelRequest,
+                        Some(client.model_id().to_string()),
+                        complete_with_vision_recovery(
+                            client,
+                            context,
+                            &tools,
+                            submit_tool.as_ref(),
+                            &tool_ctx.vision.support,
+                            emitter,
+                        ),
+                    )
+                    .await
                 {
                     // A length-capped reply is rejected whole, before anything reads it: it never
                     // becomes the assistant turn, so the next attempt's context does not carry it.
@@ -9964,7 +9986,28 @@ fn ending_blocked_feedback(reason: &str, insertion: Option<String>) -> String {
 /// nothing runs, and the reason the hook gave is what the model reads. That is deliberately
 /// indistinguishable from any other refusal — a hook is the operator's, and explaining gg's
 /// configuration to the model would teach it to argue with it.
+///
+/// The whole of it — hooks included — is one [wait on a tool call](GgWaitKind::ToolCall), named by
+/// the tool, so the agent [beats](Emitter::while_waiting) for as long as the call holds it.
 async fn dispatch_hooked(
+    registry: &ToolRegistry,
+    call: &ToolCall,
+    tool_ctx: &ToolContext,
+    hooks: &HooksSetup,
+    offload: &OffloadPolicy,
+    emitter: &Emitter,
+) -> Result<ToolOutcome, HookFailure> {
+    emitter
+        .while_waiting(
+            GgWaitKind::ToolCall,
+            Some(call.name.clone()),
+            dispatch_hooked_call(registry, call, tool_ctx, hooks, offload, emitter),
+        )
+        .await
+}
+
+/// The body of [`dispatch_hooked`], run inside its wait.
+async fn dispatch_hooked_call(
     registry: &ToolRegistry,
     call: &ToolCall,
     tool_ctx: &ToolContext,

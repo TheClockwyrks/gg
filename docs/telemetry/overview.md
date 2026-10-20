@@ -65,9 +65,11 @@ The telemetry must let a console display:
 - That the run is alive while nothing else is being emitted: one `heartbeat`
   per agent at most every 60 seconds of a wait, whether on a model request, a
   tool call, a program's execution or a subagent. It carries what the agent is
-  waiting on and how long it has waited. A run that has emitted nothing for
-  longer than the host's idle window has stopped, and the host records it so;
-  the heartbeat is what makes that reading exact. See
+  waiting on (`waitingOn`: `model_request`, `tool_call`, `program` or
+  `subagent`, with an optional `detail` naming the model, the tool, or the
+  subagents or issue) and how long it has waited (`waitedMs`). A run that has
+  emitted nothing for longer than the host's idle window has stopped, and the
+  host records it so; the heartbeat is what makes that reading exact. See
   [runtime limits](/components/driver/execution/#runtime-limits).
 - The message log: the exact request each turn sent and the reply it got,
   streamed as a de-duplicated pool of message bodies (`context_message`) plus one

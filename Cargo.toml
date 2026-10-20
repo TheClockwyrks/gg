@@ -42,7 +42,7 @@ all = "deny"
 # never names an Azure URL or a path outside the repository: the
 # dependency-edges gate refuses both.
 [workspace.dependencies]
-test-cabinet-contracts = { git = "https://github.com/TheClockwyrks/contracts", tag = "v0.2.1" }
+test-cabinet-contracts = { git = "https://github.com/TheClockwyrks/contracts", tag = "v0.2.2" }
 # The crates.io dependencies gg's crates inherit with `{ workspace = true }`, at
 # the requirements the monorepo's workspace held them at when gg was extracted.
 serde = { version = "1", features = ["derive"] }

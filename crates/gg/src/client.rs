@@ -67,7 +67,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use test_cabinet_contracts::gg::{
     GgLoopDetection, GgPromptCacheTtl, GgProviderFault, GgReasoning, GgSlotBinding,
-    GgTelemetryKind, ROOT_PROFILE_ID,
+    GgTelemetryKind, GgWaitKind, ROOT_PROFILE_ID,
 };
 use test_cabinet_contracts::gg_session_record::{GgClientRole, GgSessionAgentOrigin};
 use test_cabinet_contracts::metrics::{Cost, TokenCounts};
@@ -919,7 +919,7 @@ impl ModelClient for OpenRouterClient {
             self.stable_ttl,
             self.reasoning,
         );
-        self.send(body, messages).await
+        self.beating(self.send(body, messages)).await
     }
 
     /// Offer `tool` and pin `tool_choice` to it, so the reply is the call rather than the model's
@@ -946,22 +946,25 @@ impl ModelClient for OpenRouterClient {
             self.stable_ttl,
             self.reasoning,
         );
-        if self.tool_choice.refused(&self.model_id) {
-            body["tool_choice"] = json!("auto");
-            return self.send(body, messages).await;
-        }
-        match self.send(body.clone(), messages).await {
-            Err(ModelError::Fatal { status, message })
-                if is_tool_choice_refusal(status, &message) =>
-            {
-                if self.tool_choice.record_refusal(&self.model_id) {
-                    self.announce_tool_choice_downgrade(&message);
-                }
+        self.beating(async {
+            if self.tool_choice.refused(&self.model_id) {
                 body["tool_choice"] = json!("auto");
-                self.send(body, messages).await
+                return self.send(body, messages).await;
             }
-            outcome => outcome,
-        }
+            match self.send(body.clone(), messages).await {
+                Err(ModelError::Fatal { status, message })
+                    if is_tool_choice_refusal(status, &message) =>
+                {
+                    if self.tool_choice.record_refusal(&self.model_id) {
+                        self.announce_tool_choice_downgrade(&message);
+                    }
+                    body["tool_choice"] = json!("auto");
+                    self.send(body, messages).await
+                }
+                outcome => outcome,
+            }
+        })
+        .await
     }
 
     fn model_id(&self) -> &str {
@@ -985,6 +988,35 @@ impl ModelClient for OpenRouterClient {
 }
 
 impl OpenRouterClient {
+    /// Await one request — every attempt its retry schedule makes, and the delays between them — as
+    /// a [wait on a model request](GgWaitKind::ModelRequest) on the stream of the agent that took
+    /// this client up (the one [retries are announced on](ModelClient::announce_retries_on)), so the
+    /// agent [beats](Emitter::while_waiting) however long the provider keeps it.
+    ///
+    /// Here as well as around the turn's own call because not every request is a turn's: a
+    /// compaction's summary is asked of the same client, and holds the agent just as long. Where
+    /// both wrap one request the per-agent guard keeps it to one beat per interval. A client no
+    /// agent has taken up has no stream to beat on and simply awaits.
+    async fn beating<F: std::future::Future>(&self, request: F) -> F::Output {
+        let stream = self
+            .retry_stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match stream {
+            Some(emitter) => {
+                emitter
+                    .while_waiting(
+                        GgWaitKind::ModelRequest,
+                        Some(self.model_id.clone()),
+                        request,
+                    )
+                    .await
+            }
+            None => request.await,
+        }
+    }
+
     /// Look one generation up on the gateway's generation ledger — `GET /api/v1/generation?id=…` —
     /// and answer what it was billed, or `None` when the ledger never answered.
     ///
