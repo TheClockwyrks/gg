@@ -211,6 +211,13 @@ sourcemap = { workspace = true }
 # generator from being a second answer to one question.
 getrandom = { workspace = true }
 
+# Unix only: a timed-out shell command is killed by signalling its whole process group,
+# `kill(-pgid, SIGKILL)`, which std and tokio do not expose — `Child::start_kill` reaches `sh`
+# alone, and a grandchild it forked (a `node` that spawned a `sleep`, a server sent to the
+# background) would survive it holding the output pipe. See `src/tools/shell.runner.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 # A scratch workspace root for the tool tests (shell + filesystem): tools operate on
 # the local filesystem rooted at the invocation's workspace, so the tests exercise
