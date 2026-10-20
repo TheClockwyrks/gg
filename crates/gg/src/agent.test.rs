@@ -10565,6 +10565,12 @@ mod profile_tests;
 #[path = "agent.heartbeat.test.rs"]
 mod heartbeat_tests;
 
+/// **A command that wedges its call**, end to end on the real shell: it times out as a result the
+/// model reads, the agent beats while it lasts, and the kill leaves nothing it started running.
+#[cfg(unix)]
+#[path = "agent.wedged.test.rs"]
+mod wedged_tests;
+
 /// The **handoff-compaction summarizer's** model call reaches the record.
 ///
 /// It did not before this: gg's second model client was resolved through the same factory as the
