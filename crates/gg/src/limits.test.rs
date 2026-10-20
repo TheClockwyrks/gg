@@ -255,7 +255,7 @@ fn a_declared_model_call_ceiling_resolves_to_what_was_written() {
 }
 
 /// **Zero is refused rather than read as the default**, on the same terms as a zero turn ceiling:
-/// an operator who wrote it meant something, and gg conducting the run under fifteen minutes
+/// an operator who wrote it meant something, and gg conducting the run under thirty minutes
 /// instead would be running it under a ceiling nobody wrote. The remedy names the default, because
 /// omitting the key is the only way to ask for it.
 #[test]
@@ -297,7 +297,7 @@ fn a_declared_stream_idle_bound_resolves_to_what_was_written() {
 }
 
 /// **Zero is refused rather than read as the default**, on the same terms as a zero call ceiling:
-/// a stream allowed no seconds without a delta cancels before any reply can arrive, and gg
+/// a stream allowed no seconds without a delta cancels before any reply can complete, and gg
 /// conducting the run under sixty seconds instead would be running it under a bound nobody wrote.
 #[test]
 fn a_zero_stream_idle_bound_is_refused() {
@@ -308,7 +308,7 @@ fn a_zero_stream_idle_bound_is_refused() {
         })
         .starts_with(
             "limits.modelStreamIdleSecs = `0` — a stream allowed no seconds without a delta \
-             cancels before any reply can arrive"
+             cancels before any reply can complete"
         )
     );
 }

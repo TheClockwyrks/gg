@@ -326,9 +326,13 @@ async fn a_stall_is_a_fault_against_the_named_provider() {
         let mut attempts = seen.lock().unwrap();
         *attempts += 1;
         let body = if *attempts == 1 {
-            reqwest::Body::wrap_stream(futures_util::stream::pending::<
-                Result<&'static str, std::io::Error>,
-            >())
+            // One delta, then silence: the idle bound is armed by the delta and cuts the stall.
+            reqwest::Body::wrap_stream(
+                futures_util::stream::iter([Ok::<&'static str, std::io::Error>(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"working\"}}]}\n\n",
+                )])
+                .chain(futures_util::stream::pending()),
+            )
         } else {
             reqwest::Body::from(answer("Z.AI", 10, 0))
         };
