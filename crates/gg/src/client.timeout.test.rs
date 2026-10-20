@@ -2,10 +2,13 @@
 //! ceiling](DEFAULT_MODEL_CALL_TIMEOUT) and the [stream-idle
 //! bound](DEFAULT_MODEL_STREAM_IDLE) — against a **stalled gateway**: one that accepts the request
 //! and never answers it again, which is exactly the failure that once held a run twenty minutes
-//! inside one call with nothing able to interrupt it.
+//! inside one call with nothing able to interrupt it — and against its opposite, a **slow first
+//! delta**: a model that thinks without streaming, or a provider that sends its reply in one piece,
+//! which the idle bound must never cut, because it is unarmed until the reply's first delta.
 //!
 //! Each test states the figure its client was built with, so what is asserted is the bound the
-//! run configured rather than one gg picked.
+//! run configured rather than one gg picked — except the ones that build their client with no
+//! figure at all, which assert gg's own defaults.
 //!
 //! Every test here runs under `start_paused` time, so a bound elapses the moment the runtime has
 //! nothing left to do rather than after the bound's figure in real seconds, and the paused clock
@@ -49,6 +52,100 @@ fn two_retries() -> RetryPolicy {
     }
 }
 
+/// The SSE keep-alive comment OpenRouter holds a connection open with while a reply is pending.
+const KEEP_ALIVE: &str = ": OPENROUTER PROCESSING\n\n";
+
+/// A whole reply in one chunk: a single `write_file` tool call, its arguments complete, then the
+/// finish reason, the usage trailer and the terminal sentinel. The shape a provider that streams no
+/// reasoning and sends its reply in one piece produces — the first delta is the whole answer.
+const ONE_CHUNK_TOOL_CALL: &str = concat!(
+    "data: {\"provider\":\"Google\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+    "\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":",
+    "{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"index.html\\\"}\"}}]}}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+    "data: [DONE]\n\n",
+);
+
+/// A body that sends a [keep-alive](KEEP_ALIVE) every two seconds for `quiet`, then `reply` in one
+/// chunk at `quiet` — nothing from the model until the whole reply is ready.
+fn quiet_then(
+    quiet: Duration,
+    reply: &'static str,
+) -> impl futures_util::Stream<Item = Result<&'static str, std::io::Error>> + Send + 'static {
+    let start = tokio::time::Instant::now();
+    futures_util::stream::unfold(false, move |sent| async move {
+        if sent {
+            return None;
+        }
+        let at = start + quiet;
+        let next_keep_alive = tokio::time::Instant::now() + Duration::from_secs(2);
+        if next_keep_alive < at {
+            tokio::time::sleep_until(next_keep_alive).await;
+            Some((Ok(KEEP_ALIVE), false))
+        } else {
+            tokio::time::sleep_until(at).await;
+            Some((Ok(reply), true))
+        }
+    })
+}
+
+/// A client answered by `body` on every attempt, built with **no** bounds of its own — so it runs
+/// under [`DEFAULT_MODEL_CALL_TIMEOUT`] and [`DEFAULT_MODEL_STREAM_IDLE`] — and on `retry`, with
+/// each response head held back `head_delay`. Returns it and the count of requests it was sent.
+fn default_client<S>(
+    retry: RetryPolicy,
+    head_delay: Duration,
+    body: impl Fn() -> S + Send + Sync + 'static,
+) -> (OpenRouterClient, Arc<AtomicUsize>)
+where
+    S: futures_util::Stream<Item = Result<&'static str, std::io::Error>> + Send + 'static,
+{
+    let requests = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&requests);
+    let client = OpenRouterClient::new(
+        "http://gateway.invalid/api/v1",
+        reqwest::Client::new(),
+        "google/gemini-4-argon",
+        "sk-test",
+        retry,
+        None,
+    )
+    .with_head_delay(head_delay)
+    .answered_by(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::wrap_stream(body()))
+            .expect("a well-formed response")
+            .into()
+    });
+    (client, requests)
+}
+
+/// Every `warn` line on the sink.
+fn warnings(sink: &CollectingSink) -> Vec<String> {
+    sink.events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            GgTelemetryKind::Log { level, message } if level == "warn" => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one `write_file` call a [one-chunk reply](ONE_CHUNK_TOOL_CALL) assembles into.
+fn assert_the_one_chunk_reply(outcome: Result<ModelResponse, ModelError>) {
+    let reply = outcome.expect("a reply that arrived inside the ceiling is a reply");
+    assert_eq!(reply.tool_calls.len(), 1, "{reply:?}");
+    assert_eq!(reply.tool_calls[0].name, "write_file");
+    assert_eq!(
+        reply.tool_calls[0].arguments,
+        serde_json::json!({ "path": "index.html" })
+    );
+}
+
 /// A gateway that answers `200` with `first` as the whole of what its body ever delivers, and then
 /// never delivers another byte nor ends. Returns the client answered by it — on the retry schedule
 /// and the two bounds the test names — and the count of the requests it was sent, the direct
@@ -87,27 +184,169 @@ fn stalled_client(
     (client, requests)
 }
 
-/// A stream that goes quiet without ever sending a delta is cut on **idleness** and **retried**: the
-/// attempt is cancelled at the configured idle bound, the retry is announced naming the stall, and
-/// the next attempt runs — so a provider that stops answering costs the run the idle bound per
-/// attempt, not the call ceiling per turn. There is no provider to name, because no chunk that could
-/// have named one ever arrived.
+/// A stream that goes quiet without ever sending a delta is **not** a stall: the idle bound is
+/// unarmed until the reply's first delta, so the silence is bounded by the configured ceiling
+/// alone, however much narrower the idle bound is — and a ceiling surfaces as
+/// [`ModelError::Timeout`] without spending the retry schedule or recording a stall.
 #[tokio::test(start_paused = true)]
-async fn a_stalled_gateway_is_cancelled_at_the_idle_bound_and_retried() {
+async fn a_gateway_that_never_sends_a_delta_is_cut_at_the_ceiling_not_the_idle_bound() {
     let (client, requests) = stalled_client("", two_retries(), CONFIGURED, CONFIGURED_IDLE);
+    let sink = CollectingSink::new();
+    client.announce_retries_on(&Emitter::with_sink(None, Box::new(sink.clone())));
 
     let started = tokio::time::Instant::now();
     let outcome = client.complete(&[Message::user("build it")], &[]).await;
 
     assert_eq!(
         started.elapsed(),
-        3 * CONFIGURED_IDLE + Duration::from_secs(1) + Duration::from_secs(2),
-        "each stall cost its idle bound, and the waits between them are the schedule's own"
+        CONFIGURED,
+        "the wait for the first delta is bounded by the ceiling alone"
     );
-    assert_eq!(requests.load(Ordering::SeqCst), 3);
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
     assert!(
-        matches!(outcome, Err(ModelError::RetryExhausted { attempts: 3, .. })),
-        "a stall retried to the end of the schedule is a transport failure: {outcome:?}"
+        matches!(outcome, Err(ModelError::Timeout { after, provider: None }) if after == CONFIGURED),
+        "{outcome:?}"
+    );
+    assert!(
+        warnings(&sink).is_empty(),
+        "nothing was retried, so nothing was announced"
+    );
+    assert!(
+        !sink.events().iter().any(|event| matches!(
+            event.kind,
+            GgTelemetryKind::ProviderFault {
+                fault: GgProviderFault::Stall,
+                ..
+            }
+        )),
+        "a silence before the first delta is not a stall"
+    );
+}
+
+/// A first delta that arrives **later than the idle bound but inside the ceiling** is a reply: the
+/// keep-alives before it neither arm the idle clock nor count as progress, and the whole reply
+/// arriving in one chunk at thirty seconds — nearly three idle bounds in — completes on the first
+/// attempt.
+#[tokio::test(start_paused = true)]
+async fn a_first_delta_later_than_the_idle_bound_but_inside_the_ceiling_is_a_reply() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&requests);
+    let client = OpenRouterClient::new(
+        "http://gateway.invalid/api/v1",
+        reqwest::Client::new(),
+        "openai/gpt-5.6",
+        "sk-test",
+        two_retries(),
+        None,
+    )
+    .with_model_call_timeout(CONFIGURED)
+    .with_stream_idle(CONFIGURED_IDLE)
+    .answered_by(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::wrap_stream(quiet_then(
+                Duration::from_secs(30),
+                ONE_CHUNK_TOOL_CALL,
+            )))
+            .expect("a well-formed response")
+            .into()
+    });
+
+    let started = tokio::time::Instant::now();
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(started.elapsed(), Duration::from_secs(30));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_the_one_chunk_reply(outcome);
+}
+
+/// **Under gg's defaults**, a model that streams no reasoning and sends its whole reply — one
+/// tool call — in a single chunk ninety seconds after the request, keep-alives aside, gets that
+/// reply on the first attempt. Ninety seconds is past the sixty-second
+/// [idle bound](DEFAULT_MODEL_STREAM_IDLE), which is unarmed until the first delta, and well inside
+/// the [ceiling](DEFAULT_MODEL_CALL_TIMEOUT).
+#[tokio::test(start_paused = true)]
+async fn under_the_defaults_a_ninety_second_one_chunk_reply_completes() {
+    assert_eq!(DEFAULT_MODEL_CALL_TIMEOUT, Duration::from_secs(1800));
+    assert_eq!(DEFAULT_MODEL_STREAM_IDLE, Duration::from_secs(60));
+    let (client, requests) = default_client(RetryPolicy::default(), Duration::ZERO, || {
+        quiet_then(Duration::from_secs(90), ONE_CHUNK_TOOL_CALL)
+    });
+
+    let started = tokio::time::Instant::now();
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(started.elapsed(), Duration::from_secs(90));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_the_one_chunk_reply(outcome);
+}
+
+/// The same reply under the defaults when the provider holds back the **response head** itself
+/// for ninety seconds and then sends the whole reply at once: the head wait is bounded by the
+/// [ceiling](DEFAULT_MODEL_CALL_TIMEOUT) alone, so it completes on the first attempt too.
+#[tokio::test(start_paused = true)]
+async fn under_the_defaults_a_response_head_ninety_seconds_late_completes() {
+    let (client, requests) =
+        default_client(RetryPolicy::default(), Duration::from_secs(90), || {
+            futures_util::stream::iter([Ok(ONE_CHUNK_TOOL_CALL)])
+        });
+
+    let started = tokio::time::Instant::now();
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(started.elapsed(), Duration::from_secs(90));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_the_one_chunk_reply(outcome);
+}
+
+/// **Under gg's defaults**, a reply that starts and then stops mid-reply is still cancelled sixty
+/// seconds after its last delta, however long the first delta took to come: the clock armed by the
+/// first delta is the [idle bound](DEFAULT_MODEL_STREAM_IDLE), and the keep-alives after it do not
+/// restart it. The retry that follows answers.
+#[tokio::test(start_paused = true)]
+async fn under_the_defaults_a_reply_that_stops_mid_stream_is_cancelled_sixty_seconds_after_its_last_delta()
+ {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let (client, requests) = default_client(RetryPolicy::default(), Duration::ZERO, move || {
+        let first = seen.fetch_add(1, Ordering::SeqCst) == 0;
+        let body: std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<&'static str, std::io::Error>> + Send>,
+        > = if first {
+            // Forty seconds of keep-alives, one delta, then keep-alives forever and never a
+            // delta again.
+            Box::pin(quiet_then(Duration::from_secs(40), FIRST_EVENT).chain(
+                futures_util::stream::unfold((), |()| async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Some((Ok(KEEP_ALIVE), ()))
+                }),
+            ))
+        } else {
+            Box::pin(futures_util::stream::iter([Ok(ONE_CHUNK_TOOL_CALL)]))
+        };
+        body
+    });
+    let sink = CollectingSink::new();
+    client.announce_retries_on(&Emitter::with_sink(None, Box::new(sink.clone())));
+
+    let started = tokio::time::Instant::now();
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(
+        started.elapsed(),
+        Duration::from_secs(40) + DEFAULT_MODEL_STREAM_IDLE + RetryPolicy::default().base_delay,
+        "the stall was cut sixty seconds after the delta at forty, then one schedule wait"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    assert_the_one_chunk_reply(outcome);
+    let warned = warnings(&sink);
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0]
+            .contains("the stream stalled: no delta from the model for 60s (provider: slowco)"),
+        "{warned:?}"
     );
 }
 
@@ -116,9 +355,9 @@ async fn a_stalled_gateway_is_cancelled_at_the_idle_bound_and_retried() {
 /// answer, and an attempt that runs past the ceiling after earlier ones failed is cut at the
 /// ceiling measured from its own start.
 ///
-/// The stalled third attempt is served by a client whose idle bound is the wider of its two
-/// clocks, so it is the ceiling that cuts it — the same reading a provider that streams nothing
-/// until its reply is complete produces.
+/// The stalled third attempt never sends a delta, so the idle bound is unarmed and it is the
+/// ceiling that cuts it — the same reading a provider that streams nothing until its reply is
+/// complete produces when the reply never comes.
 #[tokio::test(start_paused = true)]
 async fn the_ceiling_bounds_each_attempt_and_leaves_the_backoff_outside() {
     let requests = Arc::new(AtomicUsize::new(0));
@@ -132,7 +371,7 @@ async fn the_ceiling_bounds_each_attempt_and_leaves_the_backoff_outside() {
         None,
     )
     .with_model_call_timeout(CONFIGURED)
-    .with_stream_idle(CONFIGURED + CONFIGURED)
+    .with_stream_idle(CONFIGURED_IDLE)
     .answered_by(move |_| {
         let attempt = seen.fetch_add(1, Ordering::SeqCst);
         let builder = http::Response::builder();
@@ -211,10 +450,11 @@ async fn a_mid_stream_stall_is_cancelled_at_the_idle_bound_naming_its_provider()
 #[tokio::test(start_paused = true)]
 async fn a_ceiling_long_silence_times_out_without_spending_retries() {
     let (client, requests) = stalled_client(
-        "",
+        // A delta at once and then silence, under an idle bound wider than the ceiling: once the
+        // idle clock is armed, the ceiling is the one that fires when it has the less time left.
+        FIRST_EVENT,
         two_retries(),
         CONFIGURED,
-        // The idle bound is the wider of the two clocks, so the ceiling is the one that fires.
         CONFIGURED + CONFIGURED,
     );
 
@@ -229,9 +469,10 @@ async fn a_ceiling_long_silence_times_out_without_spending_retries() {
     match outcome {
         Err(ModelError::Timeout { after, provider }) => {
             assert_eq!(after, CONFIGURED);
-            assert!(
-                provider.is_none(),
-                "a silence that never sent a chunk read nothing that could name a provider"
+            assert_eq!(
+                provider.as_deref(),
+                Some("slowco"),
+                "the chunk that did arrive named who was serving the attempt"
             );
         }
         other => panic!("a ceiling-long silence must time out, got {other:?}"),
@@ -254,14 +495,7 @@ async fn a_stream_that_goes_quiet_after_a_chunk_is_a_stall_naming_its_provider()
 
     let idle = Duration::from_secs(5);
     let started = tokio::time::Instant::now();
-    let outcome = read_stream(
-        stream,
-        config,
-        started + DEFAULT_MODEL_CALL_TIMEOUT,
-        started,
-        idle,
-    )
-    .await;
+    let outcome = read_stream(stream, config, started + DEFAULT_MODEL_CALL_TIMEOUT, idle).await;
     assert_eq!(started.elapsed(), idle);
     match outcome {
         StreamOutcome::Stalled { idle, provider } => {
@@ -295,7 +529,6 @@ async fn keep_alives_do_not_restart_the_idle_clock() {
         Box::pin(stream),
         None,
         started + DEFAULT_MODEL_CALL_TIMEOUT,
-        started,
         idle,
     )
     .await;
@@ -339,7 +572,6 @@ async fn a_reply_still_delivering_deltas_outlives_the_idle_bound() {
         Box::pin(deltas),
         None,
         started + DEFAULT_MODEL_CALL_TIMEOUT,
-        started,
         Duration::from_secs(5),
     )
     .await;
@@ -355,13 +587,14 @@ async fn a_reply_still_delivering_deltas_outlives_the_idle_bound() {
     }
 }
 
-/// A provider that accepts the connection and never sends a response head is a stall too: the
-/// idle clock runs from the moment the request is sent, so the attempt is cancelled at the idle
-/// bound and retried on the schedule, not held for the whole call ceiling.
+/// A provider that accepts the connection and never sends a response head is bounded by the
+/// [ceiling](DEFAULT_MODEL_CALL_TIMEOUT) alone: the idle clock is unarmed until a delta arrives,
+/// so the attempt is held for the whole ceiling and then surfaces as [`ModelError::Timeout`]
+/// without spending the retry schedule.
 ///
 /// The gateway is a real socket that is listened on and never answered.
 #[tokio::test(start_paused = true)]
-async fn a_response_head_that_never_arrives_is_a_stall() {
+async fn a_response_head_that_never_arrives_times_out_at_the_ceiling() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
     let address = listener.local_addr().expect("the bound address");
     let client = OpenRouterClient::new(
@@ -382,39 +615,66 @@ async fn a_response_head_that_never_arrives_is_a_stall() {
 
     assert_eq!(
         started.elapsed(),
-        3 * CONFIGURED_IDLE + Duration::from_secs(1) + Duration::from_secs(2),
-        "each attempt cost the idle bound, not the call ceiling"
+        CONFIGURED,
+        "the head wait cost the call ceiling, not the idle bound"
     );
     assert!(
-        matches!(outcome, Err(ModelError::RetryExhausted { attempts: 3, .. })),
+        matches!(outcome, Err(ModelError::Timeout { after, provider: None }) if after == CONFIGURED),
         "{outcome:?}"
     );
-    let warned = sink
-        .events()
-        .into_iter()
-        .filter_map(|event| match event.kind {
-            GgTelemetryKind::Log { level, message } if level == "warn" => Some(message),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        warned,
-        vec![
-            retry_message(
-                1,
-                3,
-                "the stream stalled: no delta from the model for 11s",
-                Duration::from_secs(1)
-            ),
-            retry_message(
-                2,
-                3,
-                "the stream stalled: no delta from the model for 11s",
-                Duration::from_secs(2)
-            ),
-        ]
+    assert!(
+        warnings(&sink).is_empty(),
+        "a ceiling is not retried internally"
     );
     drop(listener);
+}
+
+/// The same head wait through the [held-back gateway](OpenRouterClient::with_head_delay): a head
+/// that arrives only after the ceiling is cut at the ceiling, once.
+#[tokio::test(start_paused = true)]
+async fn a_response_head_later_than_the_ceiling_times_out_once() {
+    let (client, requests) = default_client(
+        two_retries(),
+        DEFAULT_MODEL_CALL_TIMEOUT + Duration::from_secs(1),
+        || futures_util::stream::iter([Ok(ONE_CHUNK_TOOL_CALL)]),
+    );
+
+    let started = tokio::time::Instant::now();
+    let outcome = client.complete(&[Message::user("build it")], &[]).await;
+
+    assert_eq!(started.elapsed(), DEFAULT_MODEL_CALL_TIMEOUT);
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "the head was never answered"
+    );
+    assert!(
+        matches!(outcome, Err(ModelError::Timeout { after, provider: None })
+            if after == DEFAULT_MODEL_CALL_TIMEOUT),
+        "{outcome:?}"
+    );
+}
+
+/// Keep-alive comments and blank lines **before any delta** do not arm the idle clock: a read that
+/// receives nothing else runs to the [ceiling](DEFAULT_MODEL_CALL_TIMEOUT), however many idle
+/// bounds pass, and ends as a [`Ceiling`](StreamOutcome::Ceiling) rather than a stall.
+#[tokio::test(start_paused = true)]
+async fn keep_alives_before_any_delta_reach_the_ceiling_not_a_stall() {
+    let stream = futures_util::stream::unfold((), |()| async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        Some((
+            Ok::<_, std::convert::Infallible>(": OPENROUTER PROCESSING\n\n\n".as_bytes()),
+            (),
+        ))
+    });
+    let idle = Duration::from_secs(5);
+    let started = tokio::time::Instant::now();
+    let outcome = read_stream(Box::pin(stream), None, started + CONFIGURED, idle).await;
+    assert_eq!(started.elapsed(), CONFIGURED);
+    assert!(
+        matches!(outcome, StreamOutcome::Ceiling { provider: None }),
+        "keep-alives before the first delta neither arm nor restart the idle clock: {outcome:?}"
+    );
 }
 
 /// The detector configuration the streaming tests arm, resolved the way the client resolves it.
