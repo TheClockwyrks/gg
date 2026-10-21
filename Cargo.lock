@@ -2538,8 +2538,8 @@ dependencies = [
 
 [[package]]
 name = "test-cabinet-contracts"
-version = "0.2.2"
-source = "git+https://github.com/TheClockwyrks/contracts?tag=v0.2.2#a982c96aad1cff5e40494155eb751f2091bb87ce"
+version = "0.2.3"
+source = "git+https://github.com/TheClockwyrks/contracts?tag=v0.2.3#436608c302ced17da63e07a7f8539c159c5bede7"
 dependencies = [
  "hex",
  "percent-encoding",
