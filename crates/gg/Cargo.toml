@@ -8,7 +8,7 @@ edition.workspace = true
 # and the whole recorded corpus claims to come from one indistinguishable build.
 # It is the version a `v*` tag releases; the release a deployment runs is pinned in
 # the driver, independently of it.
-version = "0.7.1"
+version = "0.7.2"
 license.workspace = true
 publish.workspace = true
 # Named explicitly rather than left to cargo's auto-detection of a `build.rs`, because building this
@@ -210,6 +210,13 @@ sourcemap = { workspace = true }
 # `wasmtime-wasi` fills WASI's `random_get` from it — and naming it here is what stops a second
 # generator from being a second answer to one question.
 getrandom = { workspace = true }
+
+# Unix only: a timed-out shell command is killed by signalling its whole process group,
+# `kill(-pgid, SIGKILL)`, which std and tokio do not expose — `Child::start_kill` reaches `sh`
+# alone, and a grandchild it forked (a `node` that spawned a `sleep`, a server sent to the
+# background) would survive it holding the output pipe. See `src/tools/shell.runner.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 # A scratch workspace root for the tool tests (shell + filesystem): tools operate on

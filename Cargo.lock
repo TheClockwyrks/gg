@@ -2538,8 +2538,8 @@ dependencies = [
 
 [[package]]
 name = "test-cabinet-contracts"
-version = "0.2.1"
-source = "git+https://github.com/TheClockwyrks/contracts?tag=v0.2.1#e7f67bfb6159ff1fb2828fe27cddaf0eae3e1207"
+version = "0.2.3"
+source = "git+https://github.com/TheClockwyrks/contracts?tag=v0.2.3#436608c302ced17da63e07a7f8539c159c5bede7"
 dependencies = [
  "hex",
  "percent-encoding",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "test-cabinet-gg"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2578,6 +2578,7 @@ dependencies = [
  "handlebars",
  "http",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "serde",

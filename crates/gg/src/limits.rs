@@ -32,7 +32,8 @@
 //! [capture journal](crate::capture) that observes the run, while
 //! [`model_call_timeout`](RunLimits::model_call_timeout) and
 //! [`model_stream_idle`](RunLimits::model_stream_idle) bound one model call: the first its whole
-//! duration, the second how long its stream may go without a delta from the model. All three are
+//! duration, and alone the wait for its first delta; the second how long its stream may go without
+//! a further delta once the first has arrived. All three are
 //! resolved here because there is one resolver for everything an operator can declare under
 //! `capabilitySet.limits`, not because any of them is an execution ceiling.
 //!
@@ -576,8 +577,8 @@ pub fn declared_model_call_timeout(declared: &GgRunLimits) -> Duration {
 /// Read on the same terms as [`declared_model_call_timeout`]: once by [`resolve_run_limits`], and
 /// once by the launch building the run's [client factory](crate::client::DefaultClientFactory),
 /// which needs the figure before an agent exists to resolve limits for. Always in force, because a
-/// stream with no idle bound is one a silent provider holds for the whole call ceiling — there is
-/// no run whose replies may stall indefinitely, so absence is a default rather than an off.
+/// started stream with no idle bound is one a provider that stops mid-reply holds for the whole
+/// call ceiling — there is no run whose replies may stall indefinitely, so absence is a default rather than an off.
 pub fn declared_model_stream_idle(declared: &GgRunLimits) -> Duration {
     match declared.model_stream_idle_secs {
         Some(0) | None => DEFAULT_MODEL_STREAM_IDLE,
@@ -643,20 +644,22 @@ pub struct RunLimits {
     /// same session-start instant, so it ends the run rather than one agent.
     pub max_runtime: Option<Duration>,
     /// The ceiling every one of the run's model calls is made under — a cap on one attempt's whole
-    /// duration. Present on every run: a set that writes no `modelCallTimeoutSecs` takes
+    /// duration, and the only bound on the wait for its reply's first delta. Present on every run: a set that writes no `modelCallTimeoutSecs` takes
     /// [`DEFAULT_MODEL_CALL_TIMEOUT`], because a call gg would wait on forever is not a ceiling an
     /// operator can have meant.
     pub model_call_timeout: Duration,
-    /// How long any of the run's streamed replies may go without a delta from the model before the
-    /// attempt is cancelled and retried on the client's
+    /// How long any of the run's streamed replies may go without a further delta from the model,
+    /// once it has started, before the attempt is cancelled and retried on the client's
     /// [schedule](Self::retry_policy). Present on every run and always in force: a set that writes
     /// no `modelStreamIdleSecs` takes
     /// [`DEFAULT_MODEL_STREAM_IDLE`], because a reply
-    /// that stopped arriving is never a setting an operator can ask for and a stream with no idle
-    /// bound is one a silent provider holds for the whole call ceiling.
+    /// that stopped arriving is never a setting an operator can ask for and a started stream with no
+    /// idle bound is one a provider that stops mid-reply holds for the whole call ceiling.
     ///
-    /// Measured since the last chunk carrying a `delta` with content, reasoning or tool-call
-    /// arguments; keep-alive comments and blank lines leave the clock running. A stream that
+    /// Armed by the first chunk carrying a `delta` with content, reasoning or tool-call arguments
+    /// and measured since the last such chunk; keep-alive comments and blank lines leave the clock
+    /// running. Before the first delta it is unarmed, and
+    /// [`model_call_timeout`](Self::model_call_timeout) alone bounds the wait. A stream that
     /// expires it is a transport failure rather than an error turn — the figure a stalled provider
     /// costs the run is this one, not [`model_call_timeout`](Self::model_call_timeout).
     pub model_stream_idle: Duration,
@@ -867,7 +870,7 @@ fn remedy(key: &str) -> &'static str {
         "Capture runs on every session, so there is no reading of this run under which the journal \
          has no ceiling: write a figure it can be bounded by."
     } else if key == LIMIT_MODEL_CALL_TIMEOUT_SECS {
-        "Every model call is made under this ceiling: omit the key to take gg's default of 900 \
+        "Every model call is made under this ceiling: omit the key to take gg's default of 1800 \
          seconds, or give it a value a call can be made under."
     } else if key == LIMIT_MODEL_STREAM_IDLE_SECS {
         "Every streamed reply is cancelled on this bound: omit the key to take gg's default of 60 \
@@ -993,16 +996,16 @@ pub fn resolve_run_limits(
     }
     let model_call_timeout = declared_model_call_timeout(&declared);
 
-    // Every streamed reply is cancelled on an idle bound, for the same reason: a stream with no
-    // idle bound is one a provider that stopped answering holds for the whole call ceiling, so
-    // absence is a default rather than an off. Zero would cancel each attempt the instant it
-    // started, before any reply could arrive, and is refused on the same terms as every other
+    // Every streamed reply is cancelled on an idle bound, for the same reason: a started stream
+    // with no idle bound is one a provider that stopped answering holds for the whole call
+    // ceiling, so absence is a default rather than an off. Zero would cancel each attempt the
+    // instant its first delta arrived, before any reply could complete, and is refused on the same terms as every other
     // unhonourable figure.
     if declared.model_stream_idle_secs == Some(0) {
         report.report(unarmable(
             LIMIT_MODEL_STREAM_IDLE_SECS,
             0,
-            "a stream allowed no seconds without a delta cancels before any reply can arrive",
+            "a stream allowed no seconds without a delta cancels before any reply can complete",
         ));
     }
     let model_stream_idle = declared_model_stream_idle(&declared);

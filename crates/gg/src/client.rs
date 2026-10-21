@@ -67,7 +67,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use test_cabinet_contracts::gg::{
     GgLoopDetection, GgPromptCacheTtl, GgProviderFault, GgReasoning, GgSlotBinding,
-    GgTelemetryKind, ROOT_PROFILE_ID,
+    GgTelemetryKind, GgWaitKind, ROOT_PROFILE_ID,
 };
 use test_cabinet_contracts::gg_session_record::{GgClientRole, GgSessionAgentOrigin};
 use test_cabinet_contracts::metrics::{Cost, TokenCounts};
@@ -103,44 +103,49 @@ const SESSION_ID_HEADER: &str = "x-session-id";
 const ERROR_BODY_CAP: usize = 2000;
 
 /// The **per-model-call ceiling** a run takes when its
-/// [limits](test_cabinet_contracts::gg::GgRunLimits) write no `modelCallTimeoutSecs`: fifteen minutes.
+/// [limits](test_cabinet_contracts::gg::GgRunLimits) write no `modelCallTimeoutSecs`: thirty minutes.
 ///
 /// The ceiling caps one **attempt's whole duration**, from sending the request to the last chunk
 /// of its reply. The backoff between attempts sits outside it, so the run's retry schedule is
 /// waited out in full whatever the ceiling.
 ///
-/// It is the outer bound. A stream that goes without a delta from the model is cut sooner by the
+/// It is the **only bound on the wait for a reply's first delta** — the response head and every
+/// chunk before the model's first content, reasoning or tool-call arguments — so a model that
+/// thinks at length without streaming, or a provider that delivers its reply in one piece, is given
+/// the whole ceiling to answer. A reply that goes quiet after it has started is cut sooner by the
 /// run's [stream-idle bound](DEFAULT_MODEL_STREAM_IDLE) and retried on the client's own schedule;
-/// the ceiling is what cuts a reply whose deltas keep arriving for longer than it, and every
-/// attempt when an operator sets the idle bound above it (for a provider that sends nothing until
-/// its reply is complete).
+/// the ceiling is what cuts a reply whose deltas keep arriving for longer than it.
 ///
 /// A call that hits the ceiling surfaces as [`ModelError::Timeout`] **immediately**, without
 /// spending the client's own retry budget — each internal retry of a ceiling-long stall would
 /// cost the full ceiling again — and the turn loop records it as an error turn and asks again, so
 /// the bounded retry is the turn-level one the error ceilings govern. It must therefore never end
 /// the session by itself.
-pub const DEFAULT_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(900);
+pub const DEFAULT_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The **stream-idle bound** a run takes when its
 /// [limits](test_cabinet_contracts::gg::GgRunLimits) write no `modelStreamIdleSecs`: **sixty
 /// seconds**.
 ///
 /// This is the bound that answers a provider which stops answering mid-reply. Every reply is read
-/// as a [stream](OpenRouterClient), so a model's silence and its thinking are distinguishable
-/// within seconds: a model that reasons at length produces reasoning deltas for the whole of that
-/// time when the provider streams them, while a provider that has stopped sends nothing, or sends
-/// only the keep-alive comments OpenRouter uses to hold a connection open. The bound is therefore
-/// measured **since the last chunk carrying a delta** — content, reasoning or tool-call arguments —
-/// or since the request was sent when none has arrived yet, and keep-alive comments and blank lines
-/// leave the clock running.
+/// as a [stream](OpenRouterClient), so once a reply has started, a model's silence and its
+/// generating are distinguishable within seconds: a reply in progress produces deltas, while a
+/// provider that has stopped sends nothing, or sends only the keep-alive comments OpenRouter uses
+/// to hold a connection open. The clock is **armed by the first chunk carrying a delta** — content,
+/// reasoning or tool-call arguments — and restarts on each such chunk after it; keep-alive
+/// comments, blank lines and chunks carrying no delta leave it running.
+///
+/// **Until the first delta the bound is unarmed**, and the wait is bounded by the
+/// [call ceiling](DEFAULT_MODEL_CALL_TIMEOUT) alone. A model that streams no reasoning, and a
+/// provider that sends nothing until its reply is complete, are never cut for silence before their
+/// reply begins: a reply that arrives in one piece inside the ceiling is a reply.
 ///
 /// A stream whose clock expires is **cancelled and retried on the client's own
 /// [schedule](RetryPolicy)**, exactly as a transport error is, so a stall costs the run the idle
 /// bound and one backoff wait rather than the whole
 /// [call ceiling](DEFAULT_MODEL_CALL_TIMEOUT) and an error turn. Sixty seconds is comfortably
 /// above the longest gap between deltas any streaming provider inserts in a healthy reply, and
-/// comfortably below the fifteen-minute ceiling a silent provider would otherwise consume.
+/// comfortably below the thirty-minute ceiling a stalled reply would otherwise consume.
 pub const DEFAULT_MODEL_STREAM_IDLE: Duration = Duration::from_secs(60);
 
 /// The most [`cache_control` breakpoints](cache_breakpoints) one request may carry.
@@ -446,16 +451,17 @@ pub fn retry_wait(attempt: u32, policy: &RetryPolicy, retry_after: Option<Durati
 /// preference for one wire shape over another; it is what makes two bounds possible that a
 /// buffering read cannot express:
 ///
-/// - the run's [stream-idle bound](DEFAULT_MODEL_STREAM_IDLE) — how long the stream may go without
-///   a **delta from the model**. A buffering read has no notion of "the model is still thinking",
-///   so a provider that stops answering is indistinguishable from one that is generating a long
-///   reply, and the only bound available is the whole-call ceiling. On a stream the two are
-///   separable within seconds: a model that reasons at length emits reasoning deltas for the whole
-///   of that time, while a provider that has stopped emits nothing — or only the keep-alive
-///   comments OpenRouter sends, which carry no delta and leave the clock running. A stream whose
-///   clock expires is cancelled and retried on the client's own [schedule](RetryPolicy) exactly as
-///   a transport error is, so a provider that stops answering costs the run the idle bound and one
-///   backoff rather than the whole ceiling and an error turn.
+/// - the run's [stream-idle bound](DEFAULT_MODEL_STREAM_IDLE) — how long a reply that has started
+///   may go without a further **delta from the model**. A buffering read has no notion of "the
+///   reply is still arriving", so a provider that stops answering is indistinguishable from one
+///   that is generating a long reply, and the only bound available is the whole-call ceiling. On a
+///   stream the two are separable within seconds once the first delta has arrived: a reply in
+///   progress emits deltas, while a provider that has stopped emits nothing — or only the
+///   keep-alive comments OpenRouter sends, which carry no delta and leave the clock running. A
+///   stream whose clock expires is cancelled and retried on the client's own
+///   [schedule](RetryPolicy) exactly as a transport error is, so a provider that stops answering
+///   costs the run the idle bound and one backoff rather than the whole ceiling and an error turn.
+///   Before the first delta the bound is unarmed and the ceiling alone bounds the wait.
 /// - [loop detection](crate::loopguard), which can only abandon a reply it is shown *while it is
 ///   arriving*. A detector handed a completed reply has nothing left to save: the money, the wall
 ///   clock and the turn are spent by then.
@@ -528,8 +534,8 @@ pub struct OpenRouterClient {
     model_call_timeout: Duration,
     /// How long this client waits, between chunks carrying a [delta](WireDelta) from the model,
     /// before cancelling the attempt — resolved from the run's
-    /// [limits](crate::limits::RunLimits::model_stream_idle), and always in force.
-    /// [`DEFAULT_MODEL_STREAM_IDLE`] states what absence resolves to.
+    /// [limits](crate::limits::RunLimits::model_stream_idle), always in force and armed on each
+    /// attempt by its first delta. [`DEFAULT_MODEL_STREAM_IDLE`] states what absence resolves to.
     model_stream_idle: Duration,
     /// The stream each retry is announced on, as a `warn` naming the attempt, the status or
     /// transport error that provoked it, and the delay before the next attempt. Set by
@@ -542,6 +548,9 @@ pub struct OpenRouterClient {
     /// drive the whole call on a paused clock with no socket whose readiness could race it.
     #[cfg(test)]
     gateway: Option<Gateway>,
+    /// Test-only: how long the [gateway](Self::gateway) holds each response head back.
+    #[cfg(test)]
+    head_delay: Duration,
 }
 
 impl OpenRouterClient {
@@ -586,6 +595,8 @@ impl OpenRouterClient {
             retry_stream: Mutex::new(None),
             #[cfg(test)]
             gateway: None,
+            #[cfg(test)]
+            head_delay: Duration::ZERO,
         }
     }
 
@@ -598,6 +609,16 @@ impl OpenRouterClient {
         gateway: impl Fn(&reqwest::Request) -> reqwest::Response + Send + Sync + 'static,
     ) -> Self {
         self.gateway = Some(std::sync::Arc::new(gateway));
+        self
+    }
+
+    /// This client's [gateway](Self::answered_by) holding every response head back for `delay`
+    /// before answering, as a provider that sends nothing until its reply is ready does — the
+    /// wait only the [call ceiling](Self::with_model_call_timeout) bounds. Test-only, and a sleep
+    /// on the runtime's clock, so a paused-time test reads it exactly.
+    #[cfg(test)]
+    pub(crate) fn with_head_delay(mut self, delay: Duration) -> Self {
+        self.head_delay = delay;
         self
     }
 
@@ -633,6 +654,7 @@ impl OpenRouterClient {
     async fn post(&self, url: &str, body: &Value) -> reqwest::Result<reqwest::Response> {
         #[cfg(test)]
         if let Some(gateway) = &self.gateway {
+            tokio::time::sleep(self.head_delay).await;
             return Ok(gateway(
                 &self
                     .attempt(reqwest::Method::POST, url)
@@ -676,14 +698,15 @@ impl OpenRouterClient {
         self
     }
 
-    /// This client cancelling a stream that goes `idle` without a delta from the model — the
-    /// run's resolved [`modelStreamIdleSecs`](crate::limits::RunLimits::model_stream_idle),
-    /// carried in beside the [call ceiling](Self::with_model_call_timeout) for the same reason:
-    /// the factory builds the clients before an agent exists to resolve limits for.
+    /// This client cancelling a started stream that goes `idle` without a further delta from the
+    /// model — the run's resolved
+    /// [`modelStreamIdleSecs`](crate::limits::RunLimits::model_stream_idle), carried in beside the
+    /// [call ceiling](Self::with_model_call_timeout) for the same reason: the factory builds the
+    /// clients before an agent exists to resolve limits for.
     ///
-    /// A client built without it takes [`DEFAULT_MODEL_STREAM_IDLE`]. There is no armed reading
-    /// of the bound to be missing: a stream with no idle bound is one a silent provider holds for
-    /// the whole call ceiling, so it is always in force.
+    /// A client built without it takes [`DEFAULT_MODEL_STREAM_IDLE`]. The bound is in force on
+    /// every call and armed on each by the reply's first delta; before it, the
+    /// [call ceiling](Self::with_model_call_timeout) alone bounds the wait.
     pub fn with_stream_idle(mut self, idle: Duration) -> Self {
         self.model_stream_idle = idle;
         self
@@ -896,7 +919,7 @@ impl ModelClient for OpenRouterClient {
             self.stable_ttl,
             self.reasoning,
         );
-        self.send(body, messages).await
+        self.beating(self.send(body, messages)).await
     }
 
     /// Offer `tool` and pin `tool_choice` to it, so the reply is the call rather than the model's
@@ -923,22 +946,25 @@ impl ModelClient for OpenRouterClient {
             self.stable_ttl,
             self.reasoning,
         );
-        if self.tool_choice.refused(&self.model_id) {
-            body["tool_choice"] = json!("auto");
-            return self.send(body, messages).await;
-        }
-        match self.send(body.clone(), messages).await {
-            Err(ModelError::Fatal { status, message })
-                if is_tool_choice_refusal(status, &message) =>
-            {
-                if self.tool_choice.record_refusal(&self.model_id) {
-                    self.announce_tool_choice_downgrade(&message);
-                }
+        self.beating(async {
+            if self.tool_choice.refused(&self.model_id) {
                 body["tool_choice"] = json!("auto");
-                self.send(body, messages).await
+                return self.send(body, messages).await;
             }
-            outcome => outcome,
-        }
+            match self.send(body.clone(), messages).await {
+                Err(ModelError::Fatal { status, message })
+                    if is_tool_choice_refusal(status, &message) =>
+                {
+                    if self.tool_choice.record_refusal(&self.model_id) {
+                        self.announce_tool_choice_downgrade(&message);
+                    }
+                    body["tool_choice"] = json!("auto");
+                    self.send(body, messages).await
+                }
+                outcome => outcome,
+            }
+        })
+        .await
     }
 
     fn model_id(&self) -> &str {
@@ -962,6 +988,35 @@ impl ModelClient for OpenRouterClient {
 }
 
 impl OpenRouterClient {
+    /// Await one request — every attempt its retry schedule makes, and the delays between them — as
+    /// a [wait on a model request](GgWaitKind::ModelRequest) on the stream of the agent that took
+    /// this client up (the one [retries are announced on](ModelClient::announce_retries_on)), so the
+    /// agent [beats](Emitter::while_waiting) however long the provider keeps it.
+    ///
+    /// Here as well as around the turn's own call because not every request is a turn's: a
+    /// compaction's summary is asked of the same client, and holds the agent just as long. Where
+    /// both wrap one request the per-agent guard keeps it to one beat per interval. A client no
+    /// agent has taken up has no stream to beat on and simply awaits.
+    async fn beating<F: std::future::Future>(&self, request: F) -> F::Output {
+        let stream = self
+            .retry_stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match stream {
+            Some(emitter) => {
+                emitter
+                    .while_waiting(
+                        GgWaitKind::ModelRequest,
+                        Some(self.model_id.clone()),
+                        request,
+                    )
+                    .await
+            }
+            None => request.await,
+        }
+    }
+
     /// Look one generation up on the gateway's generation ledger — `GET /api/v1/generation?id=…` —
     /// and answer what it was billed, or `None` when the ledger never answered.
     ///
@@ -1044,36 +1099,24 @@ impl OpenRouterClient {
             let mut refused_and_moved = false;
 
             for attempt in 1..=self.retry.max_attempts {
-                // Two clocks start with the attempt. The run's [per-call
-                // ceiling](DEFAULT_MODEL_CALL_TIMEOUT) caps the attempt's whole duration, from the
-                // request to the last chunk; the backoff between attempts sits outside it. An
-                // attempt that runs past it surfaces immediately rather than spending the retry
-                // budget, since each internal retry would cost the full ceiling again and the
-                // turn-level retry is the bounded one. The [stream-idle
-                // bound](DEFAULT_MODEL_STREAM_IDLE) runs from the request too, so a provider that
-                // never sends a response head is a stall like one that stops sending deltas.
+                // The run's [per-call ceiling](DEFAULT_MODEL_CALL_TIMEOUT) starts with the
+                // attempt and caps its whole duration, from the request to the last chunk; the
+                // backoff between attempts sits outside it. It is the only bound on the wait for
+                // the response head: the [stream-idle bound](DEFAULT_MODEL_STREAM_IDLE) is armed
+                // by the reply's first delta, so a model that thinks without streaming, or a
+                // provider that answers in one piece, is never cut for silence before its reply
+                // begins. An attempt that runs past the ceiling surfaces immediately rather than
+                // spending the retry budget, since each internal retry would cost the full
+                // ceiling again and the turn-level retry is the bounded one.
                 let started = tokio::time::Instant::now();
                 let deadline = started + self.model_call_timeout;
-                let idle_deadline = started + self.model_stream_idle;
                 last_looped = false;
-                let sent = match tokio::time::timeout_at(
-                    deadline.min(idle_deadline),
-                    self.post(&url, &body),
-                )
-                .await
-                {
-                    Ok(sent) => Some(sent),
-                    Err(_) if deadline <= idle_deadline => {
-                        return Err(ModelError::Timeout {
-                            after: self.model_call_timeout,
-                            provider: None,
-                        });
-                    }
-                    Err(_) => {
-                        last_err = stall_cause(self.model_stream_idle, None);
-                        self.announce_fault(named.as_deref(), GgProviderFault::Stall);
-                        None
-                    }
+                let Ok(sent) = tokio::time::timeout_at(deadline, self.post(&url, &body)).await
+                else {
+                    return Err(ModelError::Timeout {
+                        after: self.model_call_timeout,
+                        provider: None,
+                    });
                 };
 
                 // The `Retry-After` a retryable status carries asks for a wait of its own,
@@ -1081,11 +1124,9 @@ impl OpenRouterClient {
                 let mut retry_after = None;
 
                 match sent {
-                    // The head never arrived within the idle bound: the stall is already recorded.
-                    None => {}
                     // Transport-level failure (connect/reset/etc.): always retryable.
-                    Some(Err(err)) => last_err = format!("transport error: {err}"),
-                    Some(Ok(resp)) => {
+                    Err(err) => last_err = format!("transport error: {err}"),
+                    Ok(resp) => {
                         let status = resp.status().as_u16();
                         match classify_status(status) {
                             StatusClass::Success => {
@@ -1093,7 +1134,6 @@ impl OpenRouterClient {
                                     resp.bytes_stream(),
                                     self.loop_guard,
                                     deadline,
-                                    started,
                                     self.model_stream_idle,
                                 )
                                 .await
@@ -1340,7 +1380,9 @@ impl OpenRouterClient {
 }
 
 /// The `cause` a stalled stream is retried under: the [idle bound](DEFAULT_MODEL_STREAM_IDLE) that
-/// expired and the provider the chunks that did arrive named, when any did.
+/// expired and the provider the chunks that did arrive named, when any did. A stall always follows a
+/// delta, since the bound is unarmed before the first one, but the provider is named only by the
+/// chunks that carry it.
 ///
 /// This is the sentence the retry's `warn` line carries, so a stall and an outage reach the
 /// operator through the same channel — one says `transport error`, the other says the stream
@@ -1395,8 +1437,8 @@ enum StreamOutcome {
     /// transport error before the response head: nothing about the request was wrong.
     Interrupted(String),
     /// The stream went [`modelStreamIdleSecs`](crate::limits::RunLimits::model_stream_idle)
-    /// without a delta from the model — the bound that answers a provider which stops answering
-    /// mid-reply. **Retryable on the client's own schedule**, exactly as an interrupted connection
+    /// without a delta from the model after its first one — the bound that answers a provider
+    /// which stops answering mid-reply. **Retryable on the client's own schedule**, exactly as an interrupted connection
     /// is, because the attempt is cancelled the moment the bound expires rather than being waited
     /// out to the call ceiling.
     Stalled {
@@ -1462,21 +1504,23 @@ fn time_left(deadline: tokio::time::Instant) -> Duration {
 ///
 /// Two clocks bound the read, and they answer different questions:
 ///
-/// - `idle` is the run's [stream-idle bound](DEFAULT_MODEL_STREAM_IDLE), measured **since the last
-///   chunk carrying a delta from the model**, or since `idle_from` (the moment the request was
-///   sent) when none has arrived yet. Keep-alive comments and blank lines do not restart
-///   it, which is the whole point: they arrive repeatedly while a provider is thinking or has
-///   stopped, and a reader that treated them as progress would wait the idle bound out on each
-///   one. Expiring it is a [`Stalled`](StreamOutcome::Stalled) outcome, which the caller retries on
-///   the client's own schedule exactly as it retries a reset connection.
+/// - `idle` is the run's [stream-idle bound](DEFAULT_MODEL_STREAM_IDLE), **armed by the first chunk
+///   carrying a delta from the model** and measured since the last such chunk. Before the first
+///   delta it is unarmed: a model that thinks without streaming, or a provider that sends its reply
+///   in one piece, is bounded by the ceiling alone. Keep-alive comments, blank lines and chunks
+///   carrying no delta neither arm nor restart it, which is the whole point: they arrive repeatedly
+///   while a provider is thinking or has stopped, and a reader that treated them as progress would
+///   wait the idle bound out on each one. Expiring it is a [`Stalled`](StreamOutcome::Stalled)
+///   outcome, which the caller retries on the client's own schedule exactly as it retries a reset
+///   connection.
 /// - `deadline` is the attempt's share of the run's [per-call
 ///   ceiling](DEFAULT_MODEL_CALL_TIMEOUT), already running when the read starts (it bounds the head
 ///   wait too). Expiring it is a [`Ceiling`](StreamOutcome::Ceiling) outcome, which the caller
 ///   surfaces immediately without spending the retry budget.
 ///
-/// Each read is therefore bounded by whichever clock has the less time left, so a read is never cut
-/// by the bound that was not the reason it stalled — and which one fired is answered by comparing
-/// the two, not by an ordering the caller has to reconstruct.
+/// Once the idle clock is armed, each read is bounded by whichever clock has the less time left, so
+/// a read is never cut by the bound that was not the reason it stalled — and which one fired is
+/// answered by comparing the two, not by an ordering the caller has to reconstruct.
 ///
 /// Abandoning is simply returning: the response's chunk stream is dropped on the way out, which
 /// closes the connection and stops the provider sending the rest. gg neither reads nor pays for the
@@ -1489,7 +1533,6 @@ async fn read_stream<S, B, E>(
     mut stream: S,
     guard: Option<LoopGuardConfig>,
     deadline: tokio::time::Instant,
-    idle_from: tokio::time::Instant,
     idle: Duration,
 ) -> StreamOutcome
 where
@@ -1499,14 +1542,16 @@ where
 {
     let mut guard = guard.map(LoopGuard::new);
     let mut accumulator = StreamAccumulator::new();
-    // When the last delta from the model arrived, or when the request was sent before any has.
-    // The idle budget is spent from here, and a chunk that carries no delta (a keep-alive
-    // comment, a blank line, the usage trailer) leaves it where it was.
-    let mut last_delta = idle_from;
+    // When the last delta from the model arrived, or `None` before the first has: the idle clock
+    // is unarmed until then, and only the ceiling bounds the read. Once armed, the idle budget is
+    // spent from here, and a chunk that carries no delta (a keep-alive comment, a blank line, the
+    // usage trailer) leaves it where it was.
+    let mut last_delta: Option<tokio::time::Instant> = None;
 
     loop {
         let ceiling_left = time_left(deadline);
-        let idle_left = idle.saturating_sub(last_delta.elapsed());
+        // Unarmed, the idle clock has the ceiling's own time left, so the ceiling is what fires.
+        let idle_left = last_delta.map_or(ceiling_left, |last| idle.saturating_sub(last.elapsed()));
         let chunk = match tokio::time::timeout(ceiling_left.min(idle_left), stream.next()).await {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
@@ -1532,7 +1577,7 @@ where
             Err(err) => return StreamOutcome::Malformed(err),
         };
         if delta.progressed {
-            last_delta = tokio::time::Instant::now();
+            last_delta = Some(tokio::time::Instant::now());
         }
         if let Some(trip) = guard
             .as_mut()
