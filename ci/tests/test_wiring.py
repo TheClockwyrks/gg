@@ -99,7 +99,7 @@ PROJECT_JOBS = ".azure/project/jobs.yml"
 PROJECT_STAGES_FILE = ".azure/project/stages.yml"
 PROJECT_STAGES: list[str] = ["release"]
 PROJECT_PARAMETERS: dict[str, str] = {
-    "rustImage": "testcabinet.azurecr.io/ubuntu-the-test-cabinet-rust-cicd:ed9c9929fac51485dfc98b908ac5ff8e0a26c4ed",
+    "rustImage": "testcabinet.azurecr.io/ubuntu-the-test-cabinet-rust-cicd:32214df70437d8fcb84a52e050e52bf0dfb767a4",
     "registry": "testcabinet.azurecr.io",
     "registryEndpoint": "the-test-cabinet-acr",
     "arm64Pool": "pool-dev-linux-arm64-wus3-4c-eph-01",
