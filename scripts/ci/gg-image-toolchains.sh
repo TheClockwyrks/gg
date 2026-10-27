@@ -326,8 +326,10 @@ const [lockFile, root] = process.argv.slice(1);
 const entries = Object.entries(JSON.parse(fs.readFileSync(lockFile)).packages)
 	.filter(([key]) => key.startsWith("node_modules/"))
 	.map(([key, entry]) => [`${key.split("node_modules/").pop()}@${entry.version}`, entry.optional]);
-// An optional package, such as a native addon whose build failed, may be absent from either tree.
-const optional = new Set(entries.filter(([, isOptional]) => isOptional).map(([name]) => name));
+// An optional package, such as a native addon whose build failed, may be absent from either
+// tree, or held at another release: it decides nothing about what spago does. Compared by name.
+const packageName = (spec) => spec.slice(0, spec.lastIndexOf("@"));
+const optional = new Set(entries.filter(([, isOptional]) => isOptional).map(([name]) => packageName(name)));
 const lock = entries.filter(([, isOptional]) => !isOptional).map(([name]) => name);
 const tree = [];
 const walk = (dir) => {
@@ -348,7 +350,7 @@ const walk = (dir) => {
 };
 tree.push(`spago@${JSON.parse(fs.readFileSync(path.join(root, "package.json"))).version}`);
 walk(root);
-const have = new Set(tree.filter((p) => !optional.has(p))), want = new Set(lock);
+const have = new Set(tree.filter((p) => !optional.has(packageName(p)))), want = new Set(lock);
 const out = [...want].filter((p) => !have.has(p)).map((p) => `lock only: ${p}`)
 	.concat([...have].filter((p) => !want.has(p)).map((p) => `image only: ${p}`));
 console.log(out.sort().join("\n"));
